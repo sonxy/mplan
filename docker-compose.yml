@@ -4,7 +4,7 @@ services:
     container_name: mplan-mysql
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: mplan
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASS:-mplan}
       MYSQL_DATABASE: mplan
       TZ: Asia/Shanghai
     command:
@@ -16,7 +16,7 @@ services:
     volumes:
       - mplan_mysql:/var/lib/mysql
     healthcheck:
-      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-pmplan']
+      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-p${MYSQL_ROOT_PASS:-mplan}']
       interval: 5s
       timeout: 3s
       retries: 20

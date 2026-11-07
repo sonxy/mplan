@@ -368,16 +368,4 @@ pnpm release                         # 构建前端 → rsync → 建库建表 �
 
 更多技术债和后续优先级见 [docs/DEVELOPMENT.md §9–§10](docs/DEVELOPMENT.md)。
 
-## 开发约定
-
-- 提交前跑 `pnpm typecheck`、`pnpm test` 和 `pnpm --filter @mplan/web build`
-- 改日历 / 工期 / CSV / 权限逻辑必须补测试或可复现的验收步骤
-- 改 `schema.ts` 后执行 `pnpm db:push`，并同步更新开发手册
-- 新增写接口时默认会被登录拦截；项目级资源记得调 `requireProjectAccess()`，全局资源用 `requireAdmin()`
-- 不要提交 `.env`、`.deploy.env`、真实服务器信息或用户业务数据
-
-## 项目状态
-
-当前是个人项目，暂未开源，未授予开源许可证。等有真实使用反馈后再决定是否公开。
-
 版本变化见 [CHANGELOG.md](CHANGELOG.md)。
