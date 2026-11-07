@@ -15,7 +15,7 @@
     "@fastify/cors": "^11.1.0",
     "@mplan/core": "workspace:*",
     "dotenv": "^17.2.3",
-    "drizzle-orm": "^0.44.7",
+    "drizzle-orm": "^0.45.4",
     "fastify": "^5.6.1",
     "mysql2": "^3.15.3",
     "pino-pretty": "^13.2.0",
