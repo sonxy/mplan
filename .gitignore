@@ -1,0 +1,21 @@
+node_modules/
+dist/
+apps/*/dist/
+.chrome/
+*.log
+.DS_Store
+
+# local env
+apps/api/.env
+
+# deployment secrets
+.deploy.env
+
+# local-only user data / secrets
+local/
+.env
+.env.*
+!.env.example
+!apps/api/.env.example
+.pnpm-store/
+coverage/

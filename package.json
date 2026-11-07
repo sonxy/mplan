@@ -1,0 +1,29 @@
+{
+  "name": "mplan",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.22.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @mplan/api --filter @mplan/web dev",
+    "dev:api": "pnpm --filter @mplan/api dev",
+    "dev:web": "pnpm --filter @mplan/web dev",
+    "db:up": "docker compose up -d mysql",
+    "db:down": "docker compose down",
+    "db:push": "pnpm --filter @mplan/api db:push",
+    "db:seed": "pnpm --filter @mplan/api db:seed",
+    "setup": "pnpm db:up && sleep 6 && pnpm db:push && pnpm db:seed",
+    "test": "pnpm --filter @mplan/core test",
+    "typecheck": "pnpm -r typecheck",
+    "bootstrap": "bash scripts/init.sh",
+    "release": "bash scripts/deploy.sh"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  },
+  "description": "mplan — 精简版项目排期工具：4 层任务树、压缩工作日甘特图、按项目授权协作",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  }
+}
