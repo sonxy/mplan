@@ -65,6 +65,8 @@ export const projects = mysqlTable('projects', {
   startDate: date('start_date', { mode: 'string' }).notNull(),
   dueDate: date('due_date', { mode: 'string' }),
   note: text('note'),
+  /** 非空表示已归档：不在项目列表里显示，但任务 / 成员 / 日志都保留 */
+  archivedAt: datetime('archived_at'),
   sort: int('sort').notNull().default(0),
   createdAt: datetime('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: datetime('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),

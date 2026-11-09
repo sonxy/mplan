@@ -36,6 +36,8 @@ export interface Project {
   startDate: DateStr;
   dueDate: DateStr | null;
   note: string | null;
+  /** 归档时间（ISO）；null = 未归档。归档后默认不在项目列表里显示 */
+  archivedAt: string | null;
 }
 
 export const MAX_DEPTH = 4;

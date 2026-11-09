@@ -1,5 +1,12 @@
 import { create } from 'zustand';
-import { api, setUnauthorizedHandler, type AuthUser, type Bootstrap, type ProjectDetail } from './api';
+import {
+  api,
+  setForbiddenHandler,
+  setUnauthorizedHandler,
+  type AuthUser,
+  type Bootstrap,
+  type ProjectDetail,
+} from './api';
 import type { Zoom } from './lib/gantt';
 
 export type ModalKind = 'people' | 'calendar' | 'newProject' | 'import' | 'changes' | 'login' | 'users' | 'projectSettings' | null;
@@ -85,6 +92,8 @@ interface AppState {
   undo: () => Promise<void>;
   redo: () => Promise<void>;
   postponeTask: (id: string) => Promise<{ deltaWorkdays: number; shifted: number } | null>;
+  archiveProject: (id: string) => Promise<void>;
+  unarchiveProject: (id: string) => Promise<void>;
   addTask: (parentId: string | null, kind?: 'task' | 'milestone') => Promise<void>;
   removeTask: (id: string) => Promise<void>;
 }
@@ -379,6 +388,46 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
+  archiveProject: async (id) => {
+    if (!canAdminProject(get().user, id)) {
+      get().notify('你没有这个项目的管理权限', 'error');
+      return;
+    }
+    try {
+      await api.archiveProject(id);
+      set({ modal: null, selectedId: null });
+      await get().refreshAll();
+      const active = get().boot?.projects ?? [];
+      // 优先切到还能编辑的项目；都只读时退回第一个，至少不留在一个已归档项目上
+      const next = active.find((p) => canEditProject(get().user, p.id)) ?? active[0];
+      if (next) {
+        await get().openProject(next.id);
+      } else {
+        // 所有项目都归档了：留在空状态，在项目菜单里可以恢复
+        set({ detail: null, loading: false, canEdit: false, canAdminCurrent: false });
+      }
+      get().notify('项目已归档，不再显示在项目列表里', 'ok');
+    } catch (e) {
+      get().notify((e as Error).message);
+    }
+  },
+
+  unarchiveProject: async (id) => {
+    if (!canAdminProject(get().user, id)) {
+      get().notify('你没有这个项目的管理权限', 'error');
+      return;
+    }
+    try {
+      await api.unarchiveProject(id);
+      await get().refreshAll();
+      await get().openProject(id);
+      set({ modal: null });
+      get().notify('项目已恢复，重新显示在项目列表里', 'ok');
+    } catch (e) {
+      get().notify((e as Error).message);
+    }
+  },
+
   addTask: async (parentId, kind = 'task') => {
     if (!requireEdit(get)) return;
     const detail = get().detail;
@@ -428,4 +477,9 @@ setUnauthorizedHandler(() => {
   if (state.modal === 'login') return;
   state.notify('登录已失效，请重新登录', 'error');
   state.setModal('login');
+});
+
+// 权限被撤销：重新拉一次 bootstrap / 当前项目，让项目管理员入口和只读态立即回正
+setForbiddenHandler(() => {
+  void useApp.getState().refreshAll();
 });

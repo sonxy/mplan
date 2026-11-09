@@ -6,7 +6,7 @@ import {
   type Task,
   nextWorkday,
 } from '@mplan/core';
-import { asc, eq, inArray } from 'drizzle-orm';
+import { asc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import {
   calendarExceptions,
@@ -61,6 +61,7 @@ export function toProject(row: ProjectRow): Project {
     startDate: row.startDate,
     dueDate: row.dueDate,
     note: row.note,
+    archivedAt: row.archivedAt ? new Date(row.archivedAt).toISOString() : null,
   };
 }
 
@@ -103,10 +104,22 @@ export async function loadTaskOverrides(taskIds: string[]): Promise<Record<strin
   return groupOverrides(rows.filter((r) => r.scope === 'task'));
 }
 
-export async function listProjects(): Promise<Project[]> {
+/** 默认只返回未归档项目；归档项目只在「已归档」入口里单独查询 */
+export async function listProjects(includeArchived = false): Promise<Project[]> {
   const rows = await db
     .select()
     .from(projects)
+    .where(includeArchived ? undefined : isNull(projects.archivedAt))
+    .orderBy(asc(projects.sort), asc(projects.createdAt));
+  return rows.map(toProject);
+}
+
+/** 已归档项目；具体谁能看到由调用方按项目管理员身份过滤 */
+export async function listArchivedProjects(): Promise<Project[]> {
+  const rows = await db
+    .select()
+    .from(projects)
+    .where(isNotNull(projects.archivedAt))
     .orderBy(asc(projects.sort), asc(projects.createdAt));
   return rows.map(toProject);
 }

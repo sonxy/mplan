@@ -91,7 +91,7 @@ users               (id, username UNIQUE, display_name, password_hash,
                      role: admin|member, active, last_login_at)       -- 登录账号
 sessions            (id, user_id, token_hash UNIQUE, expires_at)     -- 登录会话
 project_members     (user_id, project_id, UNIQUE(user_id, project_id)) -- 成员可管理的项目
-projects            (id, name, code, start_date, due_date, note, sort)
+projects            (id, name, code, start_date, due_date, note, archived_at, sort)
 persons             (id, name, role, color, daily_hours, active, sort)
 calendar_settings   (id=1, name, weekend='0,6', version)
 calendar_exceptions (date UNIQUE, type: holiday|workday, name)      -- 公司级
@@ -121,6 +121,7 @@ change_log          (project_id, task_id, task_name, action, field,
 | GET/POST/PATCH/DELETE | `/api/auth/users` | 账号管理（仅管理员） |
 | GET | `/api/projects/:id` | 项目 + 任务 + 任务级例外 |
 | POST/PATCH/DELETE | `/api/projects/:id` | 项目增改删 |
+| POST | `/api/projects/:id/archive` / `unarchive` | 归档 / 恢复；归档后从项目列表隐藏，数据保留 |
 | POST/PATCH/DELETE | `/api/persons` | 人员增改删（删除时任务转为未分配） |
 | PUT | `/api/calendar` | 整表替换周末 + 例外 |
 | PUT | `/api/persons/:id/days` | 整表替换某人的加班/请假 |

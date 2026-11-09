@@ -31,9 +31,16 @@ import {
   users,
 } from './db/schema.js';
 import { actorOf, writeLog } from './lib/log.js';
-import { countUsers, requireAdmin, requireProjectAccess, requireProjectAdmin } from './lib/auth.js';
+import {
+  canAdminProject,
+  countUsers,
+  requireAdmin,
+  requireProjectAccess,
+  requireProjectAdmin,
+} from './lib/auth.js';
 import {
   deleteTaskCascade,
+  listArchivedProjects,
   listPersons,
   listProjects,
   listTasks,
@@ -114,18 +121,27 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/health', async () => ({ ok: true, today: todayStr() }));
 
   app.get('/api/bootstrap', async (req) => {
-    const [projectList, personList, company, personOverrides, userCount] = await Promise.all([
-      listProjects(),
-      listPersons(),
-      loadCompany(),
-      loadPersonOverrides(),
-      countUsers(),
-    ]);
+    const [projectList, archivedList, personList, company, personOverrides, userCount] =
+      await Promise.all([
+        listProjects(),
+        listArchivedProjects(),
+        listPersons(),
+        loadCompany(),
+        loadPersonOverrides(),
+        countUsers(),
+      ]);
+    // 归档项目只对能管理它的人可见：全局管理员看全部，项目管理员只看自己管理的
+    const archivedProjects = archivedList.filter(
+      (p) =>
+        req.currentUser?.role === 'admin' ||
+        Boolean(p.id && req.currentUser?.projectAdminIds.includes(p.id)),
+    );
     const [settings] = await db.select().from(calendarSettings).limit(1);
     const exceptions = await db.select().from(calendarExceptions);
     return {
       today: todayStr(),
       projects: projectList,
+      archivedProjects,
       persons: personList,
       calendar: {
         name: settings?.name ?? '公司日历',
@@ -154,6 +170,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const { id } = req.params as { id: string };
     const [row] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
     if (!row) throw httpError('项目不存在', 404);
+    // 归档项目只允许其管理员打开（用于恢复或查看），其他人和匿名访问一律按不存在处理
+    if (row.archivedAt && !canAdminProject(req.currentUser, id)) throw httpError('项目不存在', 404);
     const taskList = await listTasks(id);
     const taskOverrides = await loadTaskOverrides(taskList.map((t) => t.id));
     return {
@@ -170,7 +188,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     const body = parse(projectBody, req.body);
     const id = randomUUID();
     const code = body.code?.trim() || `P${Date.now().toString(36).toUpperCase().slice(-5)}`;
-    const existing = await listProjects();
+    const existing = await listProjects(true);
     await db.insert(projects).values({
       id,
       name: body.name,
@@ -207,6 +225,38 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     await db.delete(tasks).where(eq(tasks.projectId, id));
     await db.delete(projectMembers).where(eq(projectMembers.projectId, id));
     await db.delete(projects).where(eq(projects.id, id));
+    return { ok: true };
+  });
+
+  /** 归档：项目从列表里隐藏，任务 / 成员 / 变更日志都保留 */
+  app.post('/api/projects/:id/archive', async (req) => {
+    const { id } = req.params as { id: string };
+    const [row] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
+    if (!row) throw httpError('项目不存在', 404);
+    requireProjectAdmin(req, id);
+    if (!row.archivedAt) {
+      const archivedAt = new Date();
+      await db
+        .update(projects)
+        .set({ archivedAt, updatedAt: archivedAt })
+        .where(eq(projects.id, id));
+      return { ok: true, archivedAt: archivedAt.toISOString() };
+    }
+    return { ok: true, archivedAt: new Date(row.archivedAt).toISOString() };
+  });
+
+  /** 恢复归档：重新出现在项目列表里 */
+  app.post('/api/projects/:id/unarchive', async (req) => {
+    const { id } = req.params as { id: string };
+    const [row] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
+    if (!row) throw httpError('项目不存在', 404);
+    requireProjectAdmin(req, id);
+    if (row.archivedAt) {
+      await db
+        .update(projects)
+        .set({ archivedAt: null, updatedAt: new Date() })
+        .where(eq(projects.id, id));
+    }
     return { ok: true };
   });
 
@@ -791,7 +841,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       projectId = randomUUID();
       const code =
         body.newProject.code?.trim() || `P${Date.now().toString(36).toUpperCase().slice(-5)}`;
-      const existing = await listProjects();
+      const existing = await listProjects(true);
       await db.insert(projects).values({
         id: projectId,
         name: body.newProject.name,
@@ -926,6 +976,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // ---------- 变更日志 ----------
   app.get('/api/projects/:id/changes', async (req) => {
     const { id } = req.params as { id: string };
+    const [project] = await db
+      .select({ archivedAt: projects.archivedAt })
+      .from(projects)
+      .where(eq(projects.id, id))
+      .limit(1);
+    if (!project) throw httpError('项目不存在', 404);
+    if (project.archivedAt && !canAdminProject(req.currentUser, id)) {
+      throw httpError('项目不存在', 404);
+    }
     const q = req.query as { limit?: string };
     const limit = Math.min(500, Math.max(1, Number(q.limit) || 120));
     const rows = await db

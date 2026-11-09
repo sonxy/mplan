@@ -1,15 +1,15 @@
 # mplan 登录与权限
 
-> 权限分四层：**匿名只读；普通成员编辑被分配的项目；项目管理员额外管理项目设置和成员；全局管理员管理全部项目、账号、人员、日历。**
+> 权限分四层：**匿名只读；普通成员编辑被分配的项目；项目管理员额外管理项目设置、成员和归档；全局管理员管理全部项目、账号、人员、日历。**
 
-| 身份 | 只读浏览 | 编辑项目 | 项目设置 / 成员 | 账号 / 人员 / 日历 | 项目增删 |
-|---|---|---|---|---|---|
-| 未登录 | ✅ 全部项目 | ❌ | ❌ | ❌ | ❌ |
-| 成员 `member` | ✅ 全部项目 | ✅ 仅 `projectIds` 里的项目 | ❌ | ❌ | ❌ |
-| 项目管理员 | ✅ 全部项目 | ✅ 被指定为管理员的项目 | ✅ 仅这些项目 | ❌ | ❌ |
-| 全局管理员 `admin` | ✅ 全部项目 | ✅ 全部项目 | ✅ 全部项目 | ✅ | ✅ |
+| 身份 | 只读浏览 | 编辑项目 | 项目设置 / 成员 | 归档 / 恢复 | 账号 / 人员 / 日历 | 项目增删 |
+|---|---|---|---|---|---|---|
+| 未登录 | ✅ 全部项目 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| 成员 `member` | ✅ 全部项目 | ✅ 仅 `projectIds` 里的项目 | ❌ | ❌ | ❌ | ❌ |
+| 项目管理员 | ✅ 全部项目 | ✅ 被指定为管理员的项目 | ✅ 仅这些项目 | ✅ 仅这些项目 | ❌ | ❌ |
+| 全局管理员 `admin` | ✅ 全部项目 | ✅ 全部项目 | ✅ 全部项目 | ✅ 全部项目 | ✅ | ✅ |
 
-只读不需要登录，直接打开就能看。登录只是获得「修改被授权部分」的能力。
+只读不需要登录，直接打开就能看。登录只是获得「修改被授权部分」的能力。归档项目默认从项目列表隐藏，只有全局管理员和该项目的项目管理员能在「已归档项目」里看到并恢复。
 
 ---
 
@@ -24,6 +24,7 @@
 | 生产初始账号 | 发布脚本调用 `admin:create` 创建，用户名/密码来自本机 `.deploy.env`；生产**不执行 seed** |
 | 管理账号 / 分配项目 | 全局管理员点右上角头像 →「用户管理」→ 勾选项目，并给每个项目选「成员 / 项目管理员」 |
 | 项目设置 / 成员 | 项目管理员或全局管理员打开项目菜单 →「项目设置 / 成员」 |
+| 归档 / 恢复项目 | 项目管理员打开「项目设置 / 成员」→ 归档；项目菜单 →「已归档项目」→ 恢复 |
 
 > **首次登录后请立刻重置密码**：头像菜单 → 用户管理 → 自己那一行的钥匙图标。
 > 重置自己的密码会强制重新登录一次。生产环境的初始密码只存在部署机的 `.deploy.env` 里。
@@ -99,6 +100,7 @@ if (!req.currentUser) throw httpError('请先登录再修改', 401);
 | CSV 导入到已有项目 | `requireProjectAccess(req, projectId)` | 同上 |
 | CSV 导入并新建项目 | `requireAdmin(req)` | 建项目属于全局操作 |
 | 项目修改（名称 / 编号 / 日期 / 备注） | `requireProjectAdmin(req, projectId)` | 全局管理员或该项目的项目管理员 |
+| 项目归档 / 恢复 | `requireProjectAdmin(req, projectId)` | 全局管理员或该项目的项目管理员；归档后项目详情对其他人按 404 处理 |
 | 项目成员列表 / 添加 / 移除 | `requireProjectAdmin(req, projectId)` | 项目管理员可添加/移除普通成员，不能移除其他项目管理员 |
 | 项目新建 / 删除 | `requireAdmin(req)` | 项目本身是全局资源 |
 | 人员增删改 / 个人加班请假 | `requireAdmin(req)` | 人员跨项目共享 |
@@ -134,9 +136,14 @@ if (!req.currentUser) throw httpError('请先登录再修改', 401);
 | POST | `/api/projects/:id/members` | 项目管理员 | 添加普通成员（不能授予项目管理员） |
 | DELETE | `/api/projects/:id/members/:userId` | 项目管理员 | 移除普通成员；项目管理员不能移除其他项目管理员 |
 | PATCH | `/api/projects/:id` | 项目管理员 | 修改项目名称 / 编号 / 日期 / 备注 |
+| POST | `/api/projects/:id/archive` | 项目管理员 | 归档项目：从项目列表隐藏，数据保留 |
+| POST | `/api/projects/:id/unarchive` | 项目管理员 | 恢复归档项目 |
 | DELETE | `/api/auth/users/:id` | 管理员 | 删除账号（不能删自己、不能删最后一个管理员） |
 
 `GET /api/bootstrap` 会额外返回：
+
+- `projects`：只含未归档项目。
+- `archivedProjects`：只含当前用户能管理的归档项目（全局管理员返回全部；项目管理员只返回自己管理的；匿名和普通成员为空数组）。
 
 ```json
 {
@@ -196,11 +203,11 @@ MPLAN_SEED_NAME=管理员
 |---|---|
 | 密码哈希 / 会话 / Cookie / 限流 / 登录拦截 / 项目权限判断 | `apps/api/src/lib/auth.ts` |
 | 登录、初始化、用户管理与项目分配接口 | `apps/api/src/routes.auth.ts` |
-| 项目修改、项目成员接口 | `apps/api/src/routes.ts` |
+| 项目修改、项目成员、归档 / 恢复接口 | `apps/api/src/routes.ts` |
 | 任务 / 项目 / 人员 / 日历的写接口权限调用 | `apps/api/src/routes.ts` |
 | 表结构（`users` / `sessions` / `project_members`） | `apps/api/src/db/schema.ts` |
 | 登录弹窗 / 用户管理与项目角色 | `apps/web/src/components/LoginModal.tsx`、`UsersModal.tsx` |
-| 项目设置 / 成员弹窗 | `apps/web/src/components/ProjectSettingsModal.tsx` |
+| 项目设置 / 成员 / 归档弹窗 | `apps/web/src/components/ProjectSettingsModal.tsx` |
 | 登录态、`canEdit` / `canEditGlobal`、写操作兜底 | `apps/web/src/store.ts`、`apps/web/src/api.ts` |
 | 只读态 UI | `TopBar.tsx`（入口）、`Board.tsx`、`TaskDrawer.tsx`、`PeopleModal.tsx`、`CalendarModal.tsx` |
 | 变更日志署名 | `apps/api/src/lib/log.ts`（取 `req.currentUser.displayName`） |
@@ -213,8 +220,9 @@ MPLAN_SEED_NAME=管理员
 
 - 密码哈希、HttpOnly 会话 Cookie、登录限流、Origin 校验
 - 登录拦截 + 项目级写权限；项目授权实时生效
-- 项目管理员只能管理被指定的项目；不能创建账号、人员、日历，也不能删除项目
+- 项目管理员只能管理被指定的项目；不能创建账号、人员、日历，也不能删除项目；但可以归档 / 恢复自己管理的项目
 - 只有全局管理员能任命项目管理员；项目管理员不能自我提权或移除其他项目管理员
+- 归档项目默认从列表隐藏；除全局管理员和该项目项目管理员外，详情 / 变更日志接口按 404 返回
 - 全局资源（人员 / 日历 / 项目增删 / 账号）仅全局管理员
 - 账号停用 / 改密强制下线
 - 变更日志的操作人来自会话，前端伪造 `x-mplan-actor` 已失效（该头不再读取）

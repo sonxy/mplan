@@ -21,7 +21,9 @@ function ProjectRoleEditor({
   emptyHint?: string;
 }) {
   const { boot } = useApp();
-  const projects = boot?.projects ?? [];
+  // 已归档项目也要列出来，否则管理员会看不到成员在归档项目上的角色，
+  // 一保存就可能把看不见的授权覆盖掉。
+  const projects = [...(boot?.projects ?? []), ...(boot?.archivedProjects ?? [])];
 
   if (projects.length === 0) {
     return <span className="text-[11px] text-ink-3">还没有项目</span>;
@@ -53,6 +55,11 @@ function ProjectRoleEditor({
               </span>
               <span className="max-w-[180px] truncate text-[11.5px] text-ink-2">{p.name}</span>
               <span className="num text-[10px] text-ink-3">{p.code}</span>
+              {p.archivedAt && (
+                <span className="shrink-0 rounded bg-amber-50 px-1 text-[9.5px] text-amber-700">
+                  已归档
+                </span>
+              )}
             </button>
             {on && (
               <select

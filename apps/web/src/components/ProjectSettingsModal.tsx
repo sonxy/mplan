@@ -1,12 +1,22 @@
 import { useEffect, useState } from 'react';
 import clsx from 'clsx';
-import { Plus, Save, ShieldCheck, Trash2, UserRound } from 'lucide-react';
+import { Archive, ArchiveRestore, Plus, Save, ShieldCheck, Trash2, UserRound } from 'lucide-react';
 import { api, type ProjectMember } from '../api';
 import { useApp } from '../store';
 import { Button, Field, Modal, inputClass } from './ui';
 
 export function ProjectSettingsModal() {
-  const { modal, setModal, detail, user, canAdminCurrent, refreshAll, notify } = useApp();
+  const {
+    modal,
+    setModal,
+    detail,
+    user,
+    canAdminCurrent,
+    refreshAll,
+    archiveProject,
+    unarchiveProject,
+    notify,
+  } = useApp();
   const open = modal === 'projectSettings' && Boolean(detail) && canAdminCurrent;
   const projectId = detail?.project.id;
 
@@ -93,6 +103,36 @@ export function ProjectSettingsModal() {
       notify('已移出项目', 'ok');
     } catch (e) {
       notify((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const archivedAt = detail?.project.archivedAt ?? null;
+  const archived = Boolean(archivedAt);
+
+  const archive = async () => {
+    if (!projectId || !detail) return;
+    if (
+      !confirm(
+        `归档「${detail.project.name}」？归档后不再显示在项目列表里，任务、成员和变更日志都会保留，可在项目菜单的「已归档项目」里恢复。`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await archiveProject(projectId);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const restore = async () => {
+    if (!projectId) return;
+    setBusy(true);
+    try {
+      await unarchiveProject(projectId);
     } finally {
       setBusy(false);
     }
@@ -251,6 +291,46 @@ export function ProjectSettingsModal() {
             <ShieldCheck size={12} className="mt-0.5 shrink-0" />
             项目管理员可以添加/移除普通成员；项目管理员身份由全局管理员在「用户管理」里指定。
           </p>
+        </div>
+
+        <div
+          className={clsx(
+            'flex items-start gap-2.5 rounded-lg border p-3',
+            archived
+              ? 'border-amber-300 bg-amber-50/70'
+              : 'border-amber-200 bg-amber-50/40',
+          )}
+        >
+          <Archive size={14} className="mt-0.5 shrink-0 text-amber-700" />
+          <div className="min-w-0 flex-1">
+            <div className="text-[11.5px] font-medium text-amber-800">
+              {archived ? '项目已归档' : '归档项目'}
+            </div>
+            <p className="mt-0.5 text-[10.5px] leading-relaxed text-amber-700/90">
+              {archivedAt
+                ? `这个项目已在 ${new Date(archivedAt).toLocaleDateString('zh-CN')} 归档，当前不在项目列表里显示，任务和成员都保留。`
+                : '归档后不再显示在项目列表里；任务、成员和变更日志都会保留，可随时恢复。'}
+            </p>
+          </div>
+          {archived ? (
+            <Button
+              variant="outline"
+              onClick={() => void restore()}
+              disabled={busy}
+              className="shrink-0 border-amber-300 bg-white text-amber-800 hover:bg-amber-100"
+            >
+              <ArchiveRestore size={13} /> 恢复归档
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              onClick={() => void archive()}
+              disabled={busy}
+              className="shrink-0 border-amber-300 bg-white text-amber-800 hover:bg-amber-100"
+            >
+              <Archive size={13} /> 归档
+            </Button>
+          )}
         </div>
       </div>
     </Modal>

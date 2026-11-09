@@ -57,7 +57,10 @@ export interface CalendarExceptionDto {
 
 export interface Bootstrap {
   today: string;
+  /** 未归档项目，项目菜单只展示这些 */
   projects: Project[];
+  /** 已归档项目：仅全局管理员 / 对应项目管理员可见，用于恢复 */
+  archivedProjects: Project[];
   persons: Person[];
   calendar: {
     name: string;
@@ -103,10 +106,16 @@ export interface ProjectDetail {
 }
 
 let unauthorizedHandler: (() => void) | null = null;
+let forbiddenHandler: (() => void) | null = null;
 
 /** 会话过期 / 被停用后，让 store 弹出登录框 */
 export function setUnauthorizedHandler(fn: (() => void) | null): void {
   unauthorizedHandler = fn;
+}
+
+/** 权限被管理员撤销后，让 store 重新同步登录态和项目权限 */
+export function setForbiddenHandler(fn: (() => void) | null): void {
+  forbiddenHandler = fn;
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -118,6 +127,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     // 登录/初始化自己的 401 由弹窗展示，不要再触发「请先登录」的全局提示
     if (res.status === 401 && !path.startsWith('/api/auth/')) unauthorizedHandler?.();
+    // 权限可能刚被管理员撤销：重新同步一次身份，避免前端还留着旧按钮
+    if (res.status === 403 && !path.startsWith('/api/auth/')) forbiddenHandler?.();
     let message = `请求失败 (${res.status})`;
     try {
       const body = (await res.json()) as { error?: string };
@@ -192,6 +203,12 @@ export const api = {
 
   createProject: (body: { name: string; code?: string; startDate: string; dueDate?: string }) =>
     req<{ id: string }>('/api/projects', { method: 'POST', ...json(body) }),
+
+  archiveProject: (id: string) =>
+    req<{ ok: true; archivedAt: string }>(`/api/projects/${id}/archive`, { method: 'POST' }),
+
+  unarchiveProject: (id: string) =>
+    req<{ ok: true }>(`/api/projects/${id}/unarchive`, { method: 'POST' }),
 
   createTask: (
     projectId: string,

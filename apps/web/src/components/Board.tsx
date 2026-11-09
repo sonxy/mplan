@@ -563,11 +563,18 @@ export function Board() {
 
   if (!detail || !board) {
     const noProjects = Boolean(boot && boot.projects.length === 0);
+    const hasArchived = (boot?.archivedProjects.length ?? 0) > 0;
     return (
       <div className="grid flex-1 place-items-center">
         <div className="text-center">
           <p className="text-[13px] text-ink-2">
-            {!boot ? '正在加载…' : noProjects ? '还没有项目' : '没有可显示的项目'}
+            {!boot
+              ? '正在加载…'
+              : noProjects
+                ? hasArchived
+                  ? '所有项目都已归档'
+                  : '还没有项目'
+                : '没有可显示的项目'}
           </p>
           {noProjects && canEditGlobal && (
             <button
@@ -577,7 +584,12 @@ export function Board() {
               <Plus size={13} /> 新建第一个项目
             </button>
           )}
-          {noProjects && !canEditGlobal && (
+          {noProjects && hasArchived && (
+            <p className="mt-2 text-[11.5px] text-ink-3">
+              在顶部项目菜单的「已归档项目」里可以恢复。
+            </p>
+          )}
+          {noProjects && !hasArchived && !canEditGlobal && (
             <p className="mt-2 text-[11.5px] text-ink-3">
               {user ? '请联系管理员创建项目' : '登录后由管理员创建项目'}
             </p>

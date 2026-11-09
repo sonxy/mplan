@@ -1,6 +1,6 @@
 # mplan 开发与维护手册
 
-> 最后更新：2026-11-07
+> 最后更新：2026-11-09
 > 面向：项目维护和自托管部署
 > 配套阅读：[README.md](../README.md)（怎么跑）、[AUTH.md](AUTH.md)（登录与项目权限）、[DEPLOY.md](DEPLOY.md)（怎么部署）、[DESIGN.md](DESIGN.md)（为什么这么设计）、[ROADMAP.md](ROADMAP.md)（下一步讨论）
 
@@ -12,10 +12,10 @@
 
 | 维度 | 现状 |
 |---|---|
-| 版本 / 状态 | `0.1.0` / 个人项目（暂未开源） |
+| 版本 / 状态 | `0.1.0` / 个人项目（已公开，未附许可证） |
 | 代码量 | 约 1 万行 TS/TSX（不含依赖） |
 | 技术栈 | React 19 + Vite 7 / Fastify 5 + Drizzle + MySQL 8.4 / Tailwind v4 / Zustand |
-| 接口 | 29 个 REST 端点；读接口公开，写接口需登录（8 个登录/账号接口 + 3 个项目成员接口） |
+| 接口 | 31 个 REST 端点；读接口公开，写接口需登录（8 个登录/账号接口 + 3 个项目成员接口 + 2 个项目归档接口） |
 | 数据表 | 10 张（`users` / `sessions` / `project_members` + 业务 7 张） |
 | 测试 | 31 个单测（只覆盖 `packages/core`）+ CDP 截图脚本 + 可选 CI 配置 |
 | 部署 | 本地 Docker Compose；自托管 systemd + Docker nginx（见 [DEPLOY.md](DEPLOY.md)） |
@@ -29,6 +29,7 @@
 | 登录 / 退出 / 首次初始化 | ✅ | HttpOnly 会话 Cookie，密码 scrypt 哈希，登录按 IP 限流 |
 | 用户管理 | ✅ | 全局管理员增删账号、改角色、停用、重置密码、分配项目与项目管理员；变更日志自动署名 |
 | 项目管理员 | ✅ | 按项目指定；可改项目信息、管理普通成员、编辑项目内任务；不能创建账号或管全局人员/日历 |
+| 项目设置 / 归档 | ✅ | 项目管理员可改名称/编号/日期/备注、管理成员、归档与恢复；归档后不再出现在项目列表里 |
 | 最多 4 层：模块 → 一级 → 二级 → 细分 | ✅ | 服务端强制 `MAX_DEPTH = 4` |
 | 起止时间 / 人员 / 工时 / 完成状态 | ✅ | |
 | 8h/天，工时自动算结束时间 | ✅ | 双向联动，改哪边都重算 |
@@ -196,7 +197,7 @@ mplan/
 | `users` | 登录账号 | `username` 唯一；`password_hash` 为 `scrypt$salt$hash`，绝不下发 |
 | `sessions` | 登录会话 | 只存 `sha256(token)`；有 `expires_at`，登录时顺手清过期 |
 | `project_members` | 账号 ↔ 可管理项目 | `UNIQUE(user_id, project_id)`；`role: admin\|member`；全局管理员不进表 |
-| `projects` | 项目 | `code` 唯一；`sort` 控制下拉顺序 |
+| `projects` | 项目 | `code` 唯一；`sort` 控制下拉顺序；`archived_at` 非空表示已归档（默认不返回） |
 | `persons` | 人员 | `color` 是调色板 key，不是色值 |
 | `calendar_settings` | 单例（id=1） | `weekend` 存 `"0,6"` 字符串 |
 | `calendar_exceptions` | 公司级例外 | `date` 唯一；`type: holiday\|workday` |
@@ -209,6 +210,8 @@ mplan/
 > 注意：`db:seed` 会清空业务数据并重建演示项目，账号会保留，但**项目授权会随项目一起清空**（项目 id 是重新生成的）；`users` 表为空时才创建默认管理员（可用 `MPLAN_SEED_USER` / `MPLAN_SEED_PASSWORD` / `MPLAN_SEED_NAME` 覆盖）。
 
 > 从旧版本升级时，已有的 `member` 账号没有 `project_members` 记录，登录后会变成「只读」，需要管理员在「用户管理」里分配项目。
+
+**项目归档**：`projects.archived_at` 非空即归档。`listProjects()` 默认过滤归档项目；`/api/bootstrap` 的 `archivedProjects` 只返回当前用户能管理的归档项目（全局管理员全部、项目管理员只看自己管理的）。归档项目的详情 / 变更日志对其他人按 404 返回，任务、成员和日志本身不删除；归档只隐藏入口，不锁数据，恢复后原样可见。
 
 **父节点区间**：任何写操作后调 `recomputeParentRanges()`，自下而上把父节点的 `start_date/due_date` 重算成子节点的 min/max。父节点的 `estimate_hours` 永远是 0，展示时按子节点汇总（`rollupHours`）。
 
@@ -224,10 +227,12 @@ mplan/
 | POST | `/api/auth/login` | 登录，下发 HttpOnly 会话 Cookie |
 | POST | `/api/auth/logout` | 删除会话 + 清 Cookie |
 | GET/POST/PATCH/DELETE | `/api/auth/users` `/api/auth/users/:id` | 账号管理 + `projectIds` / `projectAdminIds`（仅全局管理员） |
-| GET | `/api/bootstrap` | 项目 / 人员 / 日历 / 个人例外 / today / auth（首屏一次性拿全） |
+| GET | `/api/bootstrap` | 未归档项目 + 当前用户可见的归档项目 / 人员 / 日历 / 个人例外 / today / auth（首屏一次性拿全） |
 | GET | `/api/projects/:id` | 项目 + 任务 + 任务级例外 + 个人例外 |
 | POST / DELETE | `/api/projects` `/api/projects/:id` | 项目新建 / 删除（仅全局管理员，删会级联任务） |
 | PATCH | `/api/projects/:id` | 项目信息修改（全局管理员或项目管理员） |
+| POST | `/api/projects/:id/archive` | 归档项目（项目管理员）：从项目列表隐藏，数据保留 |
+| POST | `/api/projects/:id/unarchive` | 恢复归档项目（项目管理员） |
 | GET | `/api/projects/:id/members` | 项目成员 + 可添加候选（项目管理员） |
 | POST / DELETE | `/api/projects/:id/members` `/api/projects/:id/members/:userId` | 添加 / 移除普通成员（项目管理员） |
 | POST / PATCH / DELETE | `/api/persons` `/api/persons/:id` | 人员增改删（删会把人从任务上摘掉） |
@@ -482,7 +487,6 @@ return document.querySelector('aside')?.innerText.slice(0, 80);
 | P1 | 初始管理员密码生命周期 | 首次登录强制改密、自助改密、重置后强制下线提示 |
 | P1 | 导出跟随筛选 | 一行改动，立刻可用 |
 | P1 | 变更日志分页 / 按任务筛选 | 现在只有最近 120 条 |
-| P1 | 项目设置 UI + 归档 | 现在只能新建/删除，不能改名称/日期/备注 |
 | P1 | 通知 / 我的任务 | 逾期、今日到期、被分配；跨项目看个人任务 |
 | P2 | 甘特截图导出（PNG） | 汇报刚需；CSV 已有 |
 | P2 | 移动端只读甘特 | 只读比编辑简单得多 |
@@ -526,9 +530,9 @@ return document.querySelector('aside')?.innerText.slice(0, 80);
 | 变更日志 | `apps/api/src/lib/log.ts`、`ChangesModal.tsx` |
 | 登录 / 会话 / 登录拦截 / 项目权限判断 | `apps/api/src/lib/auth.ts` |
 | 登录 / 账号管理 / 项目分配接口 | `apps/api/src/routes.auth.ts` |
-| 项目信息 / 项目成员接口 | `apps/api/src/routes.ts` |
+| 项目信息 / 项目成员 / 归档接口 | `apps/api/src/routes.ts` |
 | 登录弹窗 / 用户管理与项目角色 | `apps/web/src/components/LoginModal.tsx`、`UsersModal.tsx` |
-| 项目设置 / 成员弹窗 | `apps/web/src/components/ProjectSettingsModal.tsx` |
+| 项目设置 / 成员 / 归档弹窗 | `apps/web/src/components/ProjectSettingsModal.tsx` |
 | 只读态 UI | `apps/web/src/components/TopBar.tsx`、`Board.tsx`、`TaskDrawer.tsx`、`PeopleModal.tsx`、`CalendarModal.tsx` |
 | 表结构 | `apps/api/src/db/schema.ts` |
 | 演示数据 | `apps/api/src/db/seed.ts` |

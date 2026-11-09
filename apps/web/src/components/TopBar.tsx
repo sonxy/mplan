@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  Archive,
+  ArchiveRestore,
   CalendarDays,
   Check,
   ChevronDown,
@@ -23,9 +25,21 @@ import { downloadTextFile } from '../lib/download';
 import { Button, IconButton, Segmented } from './ui';
 
 function ProjectMenu() {
-  const { boot, detail, user, canEdit, canEditGlobal, canAdminCurrent, openProject, setModal, notify } =
-    useApp();
+  const {
+    boot,
+    detail,
+    user,
+    canEdit,
+    canEditGlobal,
+    canAdminCurrent,
+    openProject,
+    refreshAll,
+    unarchiveProject,
+    setModal,
+    notify,
+  } = useApp();
   const [open, setOpen] = useState(false);
+  const [archivedOpen, setArchivedOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -38,6 +52,7 @@ function ProjectMenu() {
   }, [open]);
 
   const current = detail?.project;
+  const archived = boot?.archivedProjects ?? [];
 
   return (
     <div className="relative" ref={ref}>
@@ -51,6 +66,11 @@ function ProjectMenu() {
         {current && (
           <span className="rounded border border-line bg-stone-50 px-1 py-px text-[10px] font-medium tracking-wide text-ink-3">
             {current.code}
+          </span>
+        )}
+        {current?.archivedAt && (
+          <span className="rounded border border-amber-200 bg-amber-50 px-1 py-px text-[10px] font-medium text-amber-700">
+            已归档
           </span>
         )}
         <ChevronDown size={14} className="text-ink-3" />
@@ -81,12 +101,76 @@ function ProjectMenu() {
               </button>
             );
           })}
+          {boot && boot.projects.length === 0 && (
+            <div className="px-2 py-1.5 text-[11.5px] leading-relaxed text-ink-3">
+              {archived.length > 0
+                ? '进行中的项目都归档了，可在下方恢复。'
+                : '还没有项目'}
+            </div>
+          )}
+
+          {archived.length > 0 && (
+            <>
+              <div className="my-1 h-px bg-line-soft" />
+              <button
+                onClick={() => setArchivedOpen((v) => !v)}
+                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-[12.5px] text-ink-2 hover:bg-stone-50"
+              >
+                <Archive size={14} /> 已归档项目
+                <span className="ml-auto num rounded bg-stone-100 px-1 text-[10px] text-ink-3">
+                  {archived.length}
+                </span>
+                <ChevronDown
+                  size={13}
+                  className={clsx('text-ink-3 transition-transform', archivedOpen && 'rotate-180')}
+                />
+              </button>
+              {archivedOpen && (
+                <div className="mt-0.5 mb-1 rounded-lg bg-stone-50/80 p-0.5">
+                  {archived.map((p) => (
+                    <div
+                      key={p.id}
+                      className="flex items-center gap-1 rounded-md px-1.5 py-1 hover:bg-white"
+                    >
+                      <button
+                        onClick={() => {
+                          setOpen(false);
+                          if (p.id !== current?.id) void openProject(p.id);
+                        }}
+                        className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                        title="查看已归档项目"
+                      >
+                        <span className="truncate text-[12px] text-ink-2">{p.name}</span>
+                        <span className="num shrink-0 text-[10px] text-ink-3">{p.code}</span>
+                        {p.id === current?.id && <Check size={12} className="shrink-0 text-brand" />}
+                      </button>
+                      <button
+                        onClick={() => void unarchiveProject(p.id)}
+                        title="恢复归档"
+                        className="grid h-6 w-6 shrink-0 place-items-center rounded text-ink-3 hover:bg-teal-50 hover:text-brand"
+                      >
+                        <ArchiveRestore size={13} />
+                      </button>
+                    </div>
+                  ))}
+                  <p className="px-1.5 py-1 text-[10px] leading-relaxed text-ink-3">
+                    已归档项目不再显示在项目列表里，点右侧图标恢复。
+                  </p>
+                </div>
+              )}
+            </>
+          )}
+
           <div className="my-1 h-px bg-line-soft" />
           {canAdminCurrent && (
             <button
               onClick={() => {
                 setOpen(false);
-                setModal('projectSettings');
+                // 入口可能来自旧权限状态：先同步一次，再决定是否打开
+                void refreshAll().then(() => {
+                  if (useApp.getState().canAdminCurrent) setModal('projectSettings');
+                  else notify('你没有这个项目的管理权限', 'error');
+                });
               }}
               className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] text-ink-2 hover:bg-stone-50"
             >
@@ -116,9 +200,11 @@ function ProjectMenu() {
             </button>
           ) : (
             <div className="px-2 py-1.5 text-[11.5px] leading-relaxed text-ink-3">
-              {user
-                ? '当前项目只读：你的账号没有被分配这个项目'
-                : '只读模式：登录后才能新建 / 导入项目'}
+              {!detail
+                ? '当前没有进行中的项目'
+                : user
+                  ? '当前项目只读：你的账号没有被分配这个项目'
+                  : '只读模式：登录后才能新建 / 导入项目'}
             </div>
           )}
           <button
@@ -137,7 +223,8 @@ function ProjectMenu() {
             <Download size={14} /> 导出当前项目 CSV
           </button>
           <div className="px-2 pt-1 pb-1.5 text-[11px] text-ink-3">
-            共 {boot?.projects.length ?? 0} 个项目
+            共 {boot?.projects.length ?? 0} 个进行中项目
+            {archived.length > 0 ? ` · ${archived.length} 个已归档` : ''}
           </div>
         </div>
       )}
