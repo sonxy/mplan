@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api, setUnauthorizedHandler, type AuthUser, type Bootstrap, type ProjectDetail } from './api';
 import type { Zoom } from './lib/gantt';
 
-export type ModalKind = 'people' | 'calendar' | 'newProject' | 'import' | 'changes' | 'login' | 'users' | null;
+export type ModalKind = 'people' | 'calendar' | 'newProject' | 'import' | 'changes' | 'login' | 'users' | 'projectSettings' | null;
 
 export interface FilterState {
   query: string;
@@ -41,6 +41,8 @@ interface AppState {
   canEdit: boolean;
   /** 全局设置（人员 / 日历 / 项目增删）仅管理员可改 */
   canEditGlobal: boolean;
+  /** 当前项目是否可管理：全局管理员，或该项目的项目管理员 */
+  canAdminCurrent: boolean;
   isAdmin: boolean;
   needsSetup: boolean;
   selectedId: string | null;
@@ -95,6 +97,12 @@ function canEditProject(user: AuthUser | null, projectId: string | undefined): b
   return Boolean(projectId && user.projectIds.includes(projectId));
 }
 
+function canAdminProject(user: AuthUser | null, projectId: string | undefined): boolean {
+  if (!user) return false;
+  if (user.role === 'admin') return true;
+  return Boolean(projectId && user.projectAdminIds.includes(projectId));
+}
+
 /** 前端兜底：匿名引导登录，已登录但没分到项目则提示找管理员；服务端还会再拦一次 */
 function requireEdit(get: () => AppState): boolean {
   if (get().canEdit) return true;
@@ -114,6 +122,7 @@ export const useApp = create<AppState>((set, get) => ({
   user: null,
   canEdit: false,
   canEditGlobal: false,
+  canAdminCurrent: false,
   isAdmin: false,
   needsSetup: false,
   selectedId: null,
@@ -139,6 +148,7 @@ export const useApp = create<AppState>((set, get) => ({
         isAdmin: authUser?.role === 'admin',
         canEditGlobal: authUser?.role === 'admin',
         canEdit: false,
+        canAdminCurrent: false,
         needsSetup: boot.auth.needsSetup,
       });
       const first = boot.projects[0];
@@ -183,6 +193,7 @@ export const useApp = create<AppState>((set, get) => ({
         user: null,
         canEdit: false,
         canEditGlobal: false,
+        canAdminCurrent: false,
         isAdmin: false,
         selectedId: null,
       });
@@ -202,6 +213,7 @@ export const useApp = create<AppState>((set, get) => ({
         loading: false,
         selectedId: null,
         canEdit: canEditProject(get().user, detail.project.id),
+        canAdminCurrent: canAdminProject(get().user, detail.project.id),
       });
     } catch (e) {
       set({ loading: false });
@@ -214,7 +226,11 @@ export const useApp = create<AppState>((set, get) => ({
     if (!id) return;
     try {
       const detail = await api.project(id);
-      set({ detail, canEdit: canEditProject(get().user, detail.project.id) });
+      set({
+        detail,
+        canEdit: canEditProject(get().user, detail.project.id),
+        canAdminCurrent: canAdminProject(get().user, detail.project.id),
+      });
     } catch (e) {
       get().notify((e as Error).message);
     }
@@ -234,9 +250,13 @@ export const useApp = create<AppState>((set, get) => ({
       const id = get().detail?.project.id ?? boot.projects[0]?.id;
       if (id) {
         const detail = await api.project(id);
-        set({ detail, canEdit: canEditProject(authUser, detail.project.id) });
+        set({
+          detail,
+          canEdit: canEditProject(authUser, detail.project.id),
+          canAdminCurrent: canAdminProject(authUser, detail.project.id),
+        });
       } else {
-        set({ canEdit: false });
+        set({ canEdit: false, canAdminCurrent: false });
       }
     } catch (e) {
       get().notify((e as Error).message);

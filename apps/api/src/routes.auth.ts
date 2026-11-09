@@ -31,6 +31,7 @@ const passwordSchema = z.string().min(6, '密码至少 6 位').max(128);
 const displayNameSchema = z.string().trim().min(1, '请填写显示名称').max(60);
 const roleSchema = z.enum(['admin', 'member']);
 const projectIdsSchema = z.array(z.string().max(36)).max(200).optional();
+const projectAdminIdsSchema = z.array(z.string().max(36)).max(200).optional();
 
 type UserRow = typeof users.$inferSelect;
 
@@ -43,19 +44,25 @@ function parse<T>(schema: z.ZodType<T>, data: unknown): T {
   return result.data;
 }
 
-function toAuthUser(row: UserRow, projectIds: string[] = []): AuthUser {
+function toAuthUser(
+  row: UserRow,
+  projectIds: string[] = [],
+  projectAdminIds: string[] = [],
+): AuthUser {
+  const globalAdmin = row.role === 'admin';
   return {
     id: row.id,
     username: row.username,
     displayName: row.displayName,
     role: row.role,
-    projectIds: row.role === 'admin' ? [] : projectIds,
+    projectIds: globalAdmin ? [] : projectIds,
+    projectAdminIds: globalAdmin ? [] : projectAdminIds,
   };
 }
 
-function toSummary(row: UserRow, projectIds: string[] = []) {
+function toSummary(row: UserRow, projectIds: string[] = [], projectAdminIds: string[] = []) {
   return {
-    ...toAuthUser(row, projectIds),
+    ...toAuthUser(row, projectIds, projectAdminIds),
     active: row.active,
     lastLoginAt: row.lastLoginAt ? new Date(row.lastLoginAt).toISOString() : null,
     createdAt: new Date(row.createdAt).toISOString(),
@@ -68,12 +75,18 @@ async function loadUser(id: string): Promise<UserRow> {
   return row;
 }
 
-async function projectIdsOf(userId: string): Promise<string[]> {
+async function projectAssignmentsOf(userId: string): Promise<{
+  projectIds: string[];
+  projectAdminIds: string[];
+}> {
   const rows = await db
-    .select({ projectId: projectMembers.projectId })
+    .select({ projectId: projectMembers.projectId, role: projectMembers.role })
     .from(projectMembers)
     .where(eq(projectMembers.userId, userId));
-  return rows.map((r) => r.projectId);
+  return {
+    projectIds: rows.map((r) => r.projectId),
+    projectAdminIds: rows.filter((r) => r.role === 'admin').map((r) => r.projectId),
+  };
 }
 
 /** 校验项目都存在并去重；去重后保持前端传入的顺序 */
@@ -88,11 +101,29 @@ async function normalizeProjectIds(ids: string[] | undefined): Promise<string[]>
   return unique;
 }
 
-async function replaceProjectAssignments(userId: string, ids: string[]): Promise<void> {
+function ensureAdminSubset(projectIds: string[], projectAdminIds: string[]): void {
+  const ids = new Set(projectIds);
+  if (projectAdminIds.some((id) => !ids.has(id))) {
+    throw httpError('项目管理员必须同时拥有该项目的编辑权限', 400);
+  }
+}
+
+async function replaceProjectAssignments(
+  userId: string,
+  projectIds: string[],
+  projectAdminIds: string[],
+): Promise<void> {
+  ensureAdminSubset(projectIds, projectAdminIds);
   await db.delete(projectMembers).where(eq(projectMembers.userId, userId));
-  if (ids.length === 0) return;
+  if (projectIds.length === 0) return;
+  const admins = new Set(projectAdminIds);
   await db.insert(projectMembers).values(
-    ids.map((projectId) => ({ id: randomUUID(), userId, projectId })),
+    projectIds.map((projectId) => ({
+      id: randomUUID(),
+      userId,
+      projectId,
+      role: admins.has(projectId) ? ('admin' as const) : ('member' as const),
+    })),
   );
 }
 
@@ -166,7 +197,8 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, row.id));
     const { token } = await createSession(row.id);
     setSessionCookie(reply, token);
-    return { user: toAuthUser(row, await projectIdsOf(row.id)) };
+    const assignments = await projectAssignmentsOf(row.id);
+    return { user: toAuthUser(row, assignments.projectIds, assignments.projectAdminIds) };
   });
 
   /** 退出要允许匿名调用：会话过期时也要能把浏览器里的 cookie 清干净 */
@@ -183,13 +215,19 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       db.select().from(users).orderBy(asc(users.createdAt), asc(users.username)),
       db.select().from(projectMembers),
     ]);
-    const byUser = new Map<string, string[]>();
+    const byUser = new Map<string, { projectIds: string[]; projectAdminIds: string[] }>();
     for (const link of links) {
-      const list = byUser.get(link.userId) ?? [];
-      list.push(link.projectId);
-      byUser.set(link.userId, list);
+      const entry = byUser.get(link.userId) ?? { projectIds: [], projectAdminIds: [] };
+      entry.projectIds.push(link.projectId);
+      if (link.role === 'admin') entry.projectAdminIds.push(link.projectId);
+      byUser.set(link.userId, entry);
     }
-    return { users: rows.map((row) => toSummary(row, byUser.get(row.id) ?? [])) };
+    return {
+      users: rows.map((row) => {
+        const entry = byUser.get(row.id);
+        return toSummary(row, entry?.projectIds ?? [], entry?.projectAdminIds ?? []);
+      }),
+    };
   });
 
   app.post('/api/auth/users', async (req, reply) => {
@@ -201,11 +239,15 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         displayName: displayNameSchema.optional(),
         role: roleSchema.optional(),
         projectIds: projectIdsSchema,
+        projectAdminIds: projectAdminIdsSchema,
       }),
       req.body,
     );
     const role = body.role ?? 'member';
     const projectIds = role === 'admin' ? [] : await normalizeProjectIds(body.projectIds);
+    const projectAdminIds =
+      role === 'admin' ? [] : await normalizeProjectIds(body.projectAdminIds);
+    ensureAdminSubset(projectIds, projectAdminIds);
     const username = body.username.toLowerCase();
     const existing = await db
       .select({ id: users.id })
@@ -226,9 +268,9 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       updatedAt: new Date(),
     };
     await db.insert(users).values(row);
-    await replaceProjectAssignments(row.id, projectIds);
+    await replaceProjectAssignments(row.id, projectIds, projectAdminIds);
     reply.code(201);
-    return { user: toSummary(row, projectIds) };
+    return { user: toSummary(row, projectIds, projectAdminIds) };
   });
 
   app.patch('/api/auth/users/:id', async (req) => {
@@ -241,18 +283,27 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
         active: z.boolean().optional(),
         password: passwordSchema.optional(),
         projectIds: projectIdsSchema,
+        projectAdminIds: projectAdminIdsSchema,
       }),
       req.body,
     );
     const target = await loadUser(id);
     const nextRole = body.role ?? target.role;
     const nextActive = body.active ?? target.active;
+    const existing = await projectAssignmentsOf(id);
     const nextProjectIds =
       nextRole === 'admin'
         ? []
         : body.projectIds !== undefined
           ? await normalizeProjectIds(body.projectIds)
-          : await projectIdsOf(id);
+          : existing.projectIds;
+    const nextProjectAdminIds =
+      nextRole === 'admin'
+        ? []
+        : body.projectAdminIds !== undefined
+          ? await normalizeProjectIds(body.projectAdminIds)
+          : existing.projectAdminIds.filter((pid) => nextProjectIds.includes(pid));
+    ensureAdminSubset(nextProjectIds, nextProjectAdminIds);
 
     if (id === me.id && !nextActive) throw httpError('不能停用自己的账号');
     if (id === me.id && nextRole !== 'admin') throw httpError('不能取消自己的管理员身份');
@@ -271,8 +322,12 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
       })
       .where(eq(users.id, id));
 
-    if (body.projectIds !== undefined || nextRole !== target.role) {
-      await replaceProjectAssignments(id, nextProjectIds);
+    if (
+      body.projectIds !== undefined ||
+      body.projectAdminIds !== undefined ||
+      nextRole !== target.role
+    ) {
+      await replaceProjectAssignments(id, nextProjectIds, nextProjectAdminIds);
     }
 
     // 停用或改密码后，强制让该账号已登录的会话失效
@@ -281,7 +336,7 @@ export async function registerAuthRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const [row] = await db.select().from(users).where(eq(users.id, id)).limit(1);
-    return { user: toSummary(row!, nextProjectIds) };
+    return { user: toSummary(row!, nextProjectIds, nextProjectAdminIds) };
   });
 
   app.delete('/api/auth/users/:id', async (req) => {

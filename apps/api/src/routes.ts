@@ -17,7 +17,7 @@ import {
   todayStr,
 } from '@mplan/core';
 import { z } from 'zod';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { db } from './db/client.js';
 import {
   calendarExceptions,
@@ -28,9 +28,10 @@ import {
   projectMembers,
   projects,
   tasks,
+  users,
 } from './db/schema.js';
 import { actorOf, writeLog } from './lib/log.js';
-import { countUsers, requireAdmin, requireProjectAccess } from './lib/auth.js';
+import { countUsers, requireAdmin, requireProjectAccess, requireProjectAdmin } from './lib/auth.js';
 import {
   deleteTaskCascade,
   listPersons,
@@ -142,6 +143,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           req.currentUser?.role === 'admin' || (req.currentUser?.projectIds.length ?? 0) > 0,
         isAdmin: req.currentUser?.role === 'admin',
         projectIds: req.currentUser?.projectIds ?? [],
+        projectAdminIds: req.currentUser?.projectAdminIds ?? [],
         needsSetup: userCount === 0,
       },
     };
@@ -183,11 +185,11 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.patch('/api/projects/:id', async (req) => {
-    requireAdmin(req);
     const { id } = req.params as { id: string };
     const body = parse(projectBody.partial(), req.body);
     const [row] = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
     if (!row) throw httpError('项目不存在', 404);
+    requireProjectAdmin(req, id);
     await db
       .update(projects)
       .set({ ...body, updatedAt: new Date() })
@@ -205,6 +207,115 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     await db.delete(tasks).where(eq(tasks.projectId, id));
     await db.delete(projectMembers).where(eq(projectMembers.projectId, id));
     await db.delete(projects).where(eq(projects.id, id));
+    return { ok: true };
+  });
+
+  // ---------- 项目成员 ----------
+  app.get('/api/projects/:id/members', async (req) => {
+    const { id } = req.params as { id: string };
+    const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, id)).limit(1);
+    if (!project) throw httpError('项目不存在', 404);
+    requireProjectAdmin(req, id);
+
+    const rows = await db
+      .select({
+        userId: users.id,
+        username: users.username,
+        displayName: users.displayName,
+        active: users.active,
+        role: projectMembers.role,
+      })
+      .from(projectMembers)
+      .innerJoin(users, eq(projectMembers.userId, users.id))
+      .where(eq(projectMembers.projectId, id))
+      .orderBy(projectMembers.role, users.displayName);
+
+    const assigned = new Set(rows.map((r) => r.userId));
+    const allUsers = await db
+      .select({
+        userId: users.id,
+        username: users.username,
+        displayName: users.displayName,
+        role: users.role,
+      })
+      .from(users)
+      .where(eq(users.active, true))
+      .orderBy(users.displayName);
+
+    return {
+      members: rows,
+      // 项目成员只能从已有账号里选；全局管理员默认拥有全部项目，不列进候选
+      candidates: allUsers.filter((u) => u.role !== 'admin' && !assigned.has(u.userId)),
+    };
+  });
+
+  app.post('/api/projects/:id/members', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = parse(z.object({ userId: z.string().min(1).max(36) }), req.body);
+    const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, id)).limit(1);
+    if (!project) throw httpError('项目不存在', 404);
+    requireProjectAdmin(req, id);
+
+    const [target] = await db.select().from(users).where(eq(users.id, body.userId)).limit(1);
+    if (!target) throw httpError('用户不存在', 404);
+    if (!target.active) throw httpError('这个账号已被停用');
+    if (target.role === 'admin') throw httpError('全局管理员默认拥有全部项目权限，不需要添加');
+
+    const [existing] = await db
+      .select({ id: projectMembers.id, role: projectMembers.role })
+      .from(projectMembers)
+      .where(
+        and(eq(projectMembers.projectId, id), eq(projectMembers.userId, body.userId)),
+      )
+      .limit(1);
+    if (existing) {
+      reply.code(200);
+      return {
+        member: {
+          userId: target.id,
+          username: target.username,
+          displayName: target.displayName,
+          active: target.active,
+          role: existing.role,
+        },
+      };
+    }
+
+    await db.insert(projectMembers).values({
+      id: randomUUID(),
+      userId: target.id,
+      projectId: id,
+      role: 'member',
+    });
+    reply.code(201);
+    return {
+      member: {
+        userId: target.id,
+        username: target.username,
+        displayName: target.displayName,
+        active: target.active,
+        role: 'member' as const,
+      },
+    };
+  });
+
+  app.delete('/api/projects/:id/members/:userId', async (req) => {
+    const { id, userId } = req.params as { id: string; userId: string };
+    const [project] = await db.select({ id: projects.id }).from(projects).where(eq(projects.id, id)).limit(1);
+    if (!project) throw httpError('项目不存在', 404);
+    requireProjectAdmin(req, id);
+
+    const [link] = await db
+      .select({ id: projectMembers.id, role: projectMembers.role })
+      .from(projectMembers)
+      .where(and(eq(projectMembers.projectId, id), eq(projectMembers.userId, userId)))
+      .limit(1);
+    if (!link) throw httpError('这个用户不在项目成员里', 404);
+    if (req.currentUser?.id === userId) throw httpError('不能移除自己');
+    if (req.currentUser?.role !== 'admin' && link.role === 'admin') {
+      throw httpError('项目管理员不能移除其他项目管理员', 403);
+    }
+    await db.delete(projectMembers).where(eq(projectMembers.id, link.id));
     return { ok: true };
   });
 

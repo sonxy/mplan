@@ -5,8 +5,10 @@ export interface AuthUser {
   username: string;
   displayName: string;
   role: 'admin' | 'member';
-  /** 普通成员可管理的项目 id；管理员为空数组（隐含全部项目） */
+  /** 可编辑的项目 id；全局管理员为空数组（隐含全部项目） */
   projectIds: string[];
+  /** 被指定为项目管理员的项目 id；全局管理员为空数组 */
+  projectAdminIds: string[];
 }
 
 export interface AuthInfo {
@@ -16,6 +18,7 @@ export interface AuthInfo {
   /** 管理员：可管理账号、人员、日历，并编辑全部项目 */
   isAdmin: boolean;
   projectIds: string[];
+  projectAdminIds: string[];
   /** 库里还没有任何账号，引导创建第一个管理员 */
   needsSetup: boolean;
 }
@@ -24,6 +27,26 @@ export interface AuthUserSummary extends AuthUser {
   active: boolean;
   lastLoginAt: string | null;
   createdAt: string;
+}
+
+export type ProjectMemberRole = 'admin' | 'member';
+
+export interface ProjectMember {
+  userId: string;
+  username: string;
+  displayName: string;
+  active: boolean;
+  role: ProjectMemberRole;
+}
+
+export interface ProjectMembers {
+  members: ProjectMember[];
+  candidates: Array<{
+    userId: string;
+    username: string;
+    displayName: string;
+    role: 'admin' | 'member';
+  }>;
 }
 
 export interface CalendarExceptionDto {
@@ -130,6 +153,7 @@ export const api = {
     displayName?: string;
     role?: 'admin' | 'member';
     projectIds?: string[];
+    projectAdminIds?: string[];
   }) => req<{ user: AuthUserSummary }>('/api/auth/users', { method: 'POST', ...json(body) }),
 
   patchUser: (
@@ -140,11 +164,29 @@ export const api = {
       role: 'admin' | 'member';
       active: boolean;
       projectIds: string[];
+      projectAdminIds: string[];
     }>,
   ) => req<{ user: AuthUserSummary }>(`/api/auth/users/${id}`, { method: 'PATCH', ...json(body) }),
 
   deleteUser: (id: string) =>
     req<{ ok: true }>(`/api/auth/users/${id}`, { method: 'DELETE' }),
+
+  // ---------- 项目设置 / 成员 ----------
+  patchProject: (
+    id: string,
+    body: Partial<{ name: string; code: string; startDate: string; dueDate: string | null; note: string | null }>,
+  ) => req<{ ok: true }>(`/api/projects/${id}`, { method: 'PATCH', ...json(body) }),
+
+  projectMembers: (id: string) => req<ProjectMembers>(`/api/projects/${id}/members`),
+
+  addProjectMember: (projectId: string, userId: string) =>
+    req<{ member: ProjectMember }>(`/api/projects/${projectId}/members`, {
+      method: 'POST',
+      ...json({ userId }),
+    }),
+
+  removeProjectMember: (projectId: string, userId: string) =>
+    req<{ ok: true }>(`/api/projects/${projectId}/members/${userId}`, { method: 'DELETE' }),
 
   project: (id: string) => req<ProjectDetail>(`/api/projects/${id}`),
 

@@ -15,8 +15,10 @@ export interface AuthUser {
   username: string;
   displayName: string;
   role: UserRole;
-  /** 普通成员可管理的项目 id；管理员为空数组，因为隐含拥有全部项目 */
+  /** 可编辑的项目 id；全局管理员为空数组，因为隐含拥有全部项目 */
   projectIds: string[];
+  /** 其中被指定为「项目管理员」的项目 id；全局管理员为空数组 */
+  projectAdminIds: string[];
 }
 
 export const SESSION_COOKIE = 'mplan_session';
@@ -101,12 +103,14 @@ export async function resolveSession(token: string | null): Promise<AuthUser | n
     return null;
   }
   let projectIds: string[] = [];
+  let projectAdminIds: string[] = [];
   if (row.role !== 'admin') {
     const links = await db
-      .select({ projectId: projectMembers.projectId })
+      .select({ projectId: projectMembers.projectId, role: projectMembers.role })
       .from(projectMembers)
       .where(eq(projectMembers.userId, row.id));
     projectIds = links.map((l) => l.projectId);
+    projectAdminIds = links.filter((l) => l.role === 'admin').map((l) => l.projectId);
   }
   return {
     id: row.id,
@@ -114,6 +118,7 @@ export async function resolveSession(token: string | null): Promise<AuthUser | n
     displayName: row.displayName,
     role: row.role,
     projectIds,
+    projectAdminIds,
   };
 }
 
@@ -131,6 +136,22 @@ export function requireProjectAccess(
 ): void {
   if (!req.currentUser) throw httpError('请先登录再修改', 401);
   if (!canManageProject(req.currentUser, projectId)) throw httpError(message, 403);
+}
+
+/** 项目管理员：全局管理员，或该项目被指定为 admin 的成员 */
+export function canAdminProject(user: AuthUser | null, projectId: string | null | undefined): boolean {
+  if (!user) return false;
+  if (user.role === 'admin') return true;
+  return Boolean(projectId && user.projectAdminIds.includes(projectId));
+}
+
+export function requireProjectAdmin(
+  req: FastifyRequest,
+  projectId: string | null | undefined,
+  message = '你没有这个项目的管理权限',
+): void {
+  if (!req.currentUser) throw httpError('请先登录', 401);
+  if (!canAdminProject(req.currentUser, projectId)) throw httpError(message, 403);
 }
 
 export function requireAdmin(req: FastifyRequest): AuthUser {

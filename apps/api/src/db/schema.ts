@@ -35,6 +35,8 @@ export const projectMembers = mysqlTable(
     id: varchar('id', { length: 36 }).primaryKey(),
     userId: varchar('user_id', { length: 36 }).notNull(),
     projectId: varchar('project_id', { length: 36 }).notNull(),
+    /** 项目内角色：admin = 项目管理员，member = 普通成员 */
+    role: mysqlEnum('role', ['admin', 'member']).notNull().default('member'),
     createdAt: datetime('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (t) => [

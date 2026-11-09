@@ -13,6 +13,7 @@ import { ImportModal } from './components/ImportModal';
 import { ChangesModal } from './components/ChangesModal';
 import { LoginModal } from './components/LoginModal';
 import { UsersModal } from './components/UsersModal';
+import { ProjectSettingsModal } from './components/ProjectSettingsModal';
 import { Button, Field, Modal, inputClass } from './components/ui';
 
 function NewProjectModal() {
@@ -196,6 +197,7 @@ export function App() {
       <NewProjectModal />
       <LoginModal />
       <UsersModal />
+      <ProjectSettingsModal />
       <Toast />
       {!boot && (
         <div className="fixed inset-0 z-[90] grid place-items-center bg-canvas">

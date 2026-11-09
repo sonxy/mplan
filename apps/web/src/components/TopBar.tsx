@@ -10,6 +10,7 @@ import {
   LogIn,
   LogOut,
   Plus,
+  Settings2,
   Undo2,
   Upload,
   UserCog,
@@ -22,7 +23,8 @@ import { downloadTextFile } from '../lib/download';
 import { Button, IconButton, Segmented } from './ui';
 
 function ProjectMenu() {
-  const { boot, detail, user, canEdit, canEditGlobal, openProject, setModal, notify } = useApp();
+  const { boot, detail, user, canEdit, canEditGlobal, canAdminCurrent, openProject, setModal, notify } =
+    useApp();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -80,6 +82,17 @@ function ProjectMenu() {
             );
           })}
           <div className="my-1 h-px bg-line-soft" />
+          {canAdminCurrent && (
+            <button
+              onClick={() => {
+                setOpen(false);
+                setModal('projectSettings');
+              }}
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-[13px] text-ink-2 hover:bg-stone-50"
+            >
+              <Settings2 size={14} /> 项目设置 / 成员
+            </button>
+          )}
           {canEditGlobal && (
             <button
               onClick={() => {
@@ -188,7 +201,11 @@ function UserMenu() {
               {user.role === 'admin'
                 ? '全部项目可编辑'
                 : user.projectIds.length
-                  ? `管理 ${user.projectIds.length} 个项目`
+                  ? `管理 ${user.projectIds.length} 个项目${
+                      user.projectAdminIds.length
+                        ? ` · ${user.projectAdminIds.length} 个项目管理员`
+                        : ''
+                    }`
                   : '还没有分配可管理的项目'}
             </div>
           </div>

@@ -15,7 +15,7 @@
 | 版本 / 状态 | `0.1.0` / 个人项目（暂未开源） |
 | 代码量 | 约 1 万行 TS/TSX（不含依赖） |
 | 技术栈 | React 19 + Vite 7 / Fastify 5 + Drizzle + MySQL 8.4 / Tailwind v4 / Zustand |
-| 接口 | 26 个 REST 端点；读接口公开，写接口需登录（8 个登录/账号接口） |
+| 接口 | 29 个 REST 端点；读接口公开，写接口需登录（8 个登录/账号接口 + 3 个项目成员接口） |
 | 数据表 | 10 张（`users` / `sessions` / `project_members` + 业务 7 张） |
 | 测试 | 31 个单测（只覆盖 `packages/core`）+ CDP 截图脚本 + 可选 CI 配置 |
 | 部署 | 本地 Docker Compose；自托管 systemd + Docker nginx（见 [DEPLOY.md](DEPLOY.md)） |
@@ -27,7 +27,8 @@
 |---|---|---|
 | 匿名只读 / 按项目授权编辑 | ✅ | 写接口先过 `attachAuth()` 登录拦截，再按项目 `requireProjectAccess()`；匿名写 401、越权写 403 |
 | 登录 / 退出 / 首次初始化 | ✅ | HttpOnly 会话 Cookie，密码 scrypt 哈希，登录按 IP 限流 |
-| 用户管理 | ✅ | 管理员增删账号、改角色、停用、重置密码、分配可管理的项目；变更日志自动署名 |
+| 用户管理 | ✅ | 全局管理员增删账号、改角色、停用、重置密码、分配项目与项目管理员；变更日志自动署名 |
+| 项目管理员 | ✅ | 按项目指定；可改项目信息、管理普通成员、编辑项目内任务；不能创建账号或管全局人员/日历 |
 | 最多 4 层：模块 → 一级 → 二级 → 细分 | ✅ | 服务端强制 `MAX_DEPTH = 4` |
 | 起止时间 / 人员 / 工时 / 完成状态 | ✅ | |
 | 8h/天，工时自动算结束时间 | ✅ | 双向联动，改哪边都重算 |
@@ -194,7 +195,7 @@ mplan/
 |---|---|---|
 | `users` | 登录账号 | `username` 唯一；`password_hash` 为 `scrypt$salt$hash`，绝不下发 |
 | `sessions` | 登录会话 | 只存 `sha256(token)`；有 `expires_at`，登录时顺手清过期 |
-| `project_members` | 账号 ↔ 可管理项目 | `UNIQUE(user_id, project_id)`；管理员不进表（隐含全部项目） |
+| `project_members` | 账号 ↔ 可管理项目 | `UNIQUE(user_id, project_id)`；`role: admin\|member`；全局管理员不进表 |
 | `projects` | 项目 | `code` 唯一；`sort` 控制下拉顺序 |
 | `persons` | 人员 | `color` 是调色板 key，不是色值 |
 | `calendar_settings` | 单例（id=1） | `weekend` 存 `"0,6"` 字符串 |
@@ -222,10 +223,13 @@ mplan/
 | POST | `/api/auth/setup` | 仅 0 账号时创建首个管理员并登录 |
 | POST | `/api/auth/login` | 登录，下发 HttpOnly 会话 Cookie |
 | POST | `/api/auth/logout` | 删除会话 + 清 Cookie |
-| GET/POST/PATCH/DELETE | `/api/auth/users` `/api/auth/users/:id` | 账号管理 + `projectIds` 项目分配（仅管理员） |
+| GET/POST/PATCH/DELETE | `/api/auth/users` `/api/auth/users/:id` | 账号管理 + `projectIds` / `projectAdminIds`（仅全局管理员） |
 | GET | `/api/bootstrap` | 项目 / 人员 / 日历 / 个人例外 / today / auth（首屏一次性拿全） |
 | GET | `/api/projects/:id` | 项目 + 任务 + 任务级例外 + 个人例外 |
-| POST / PATCH / DELETE | `/api/projects` `/api/projects/:id` | 项目增改删（删会级联任务） |
+| POST / DELETE | `/api/projects` `/api/projects/:id` | 项目新建 / 删除（仅全局管理员，删会级联任务） |
+| PATCH | `/api/projects/:id` | 项目信息修改（全局管理员或项目管理员） |
+| GET | `/api/projects/:id/members` | 项目成员 + 可添加候选（项目管理员） |
+| POST / DELETE | `/api/projects/:id/members` `/api/projects/:id/members/:userId` | 添加 / 移除普通成员（项目管理员） |
 | POST / PATCH / DELETE | `/api/persons` `/api/persons/:id` | 人员增改删（删会把人从任务上摘掉） |
 | PUT | `/api/persons/:id/days` | 整表替换某人的加班/请假 |
 | PUT | `/api/calendar` | 整表替换周末 + 例外 |
@@ -253,10 +257,11 @@ recalc: 'hours'  // 按工时重排结束日（默认）
 
 1. **登录**：`GET / HEAD` 全部公开；`POST / PUT / PATCH / DELETE` 除 `/api/auth/login`、`/api/auth/setup`、`/api/auth/logout` 外都要求登录。由 `attachAuth()` 统一做，新增写路由不需要单独写 401。
 2. **资源**：登录之后还要判断能不能改这个资源。
-   - 任务 / 任务加班日 / 顺延 / 导入到已有项目：`requireProjectAccess(req, projectId)` —— 管理员或 `projectIds` 包含该项目；
-   - 项目增删改、人员增删改、公司日历、导入时新建项目、账号管理：`requireAdmin(req)`。
+   - 任务 / 任务加班日 / 顺延 / 导入到已有项目：`requireProjectAccess(req, projectId)` —— 全局管理员或 `projectIds` 包含该项目；
+   - 项目信息修改、项目成员管理：`requireProjectAdmin(req, projectId)` —— 全局管理员或 `projectAdminIds` 包含该项目；
+   - 项目增删、人员增删改、公司日历、导入时新建项目、账号管理：`requireAdmin(req)`。
 
-`GET /api/auth/users` 返回的每个账号带 `projectIds`；`POST/PATCH` 接受 `projectIds`（整表替换，必须都是已存在的项目）。
+`GET /api/auth/users` 返回的每个账号带 `projectIds` / `projectAdminIds`；`POST/PATCH` 接受这两个数组（整表替换，项目管理员必须是项目成员的子集）。项目管理员身份只能由全局管理员在用户管理里指定。
 
 **变更日志的 actor**：来自会话里的登录用户（`req.currentUser.displayName`），前端无法伪造；旧的 `x-mplan-actor` 头已经不再读取。
 
@@ -266,15 +271,16 @@ recalc: 'hours'  // 按工时重排结束日（默认）
 
 ### 状态（Zustand，单 store）
 
-`boot`（全局）、`detail`（当前项目全量任务）、`user` / `canEdit`（当前项目）/ `canEditGlobal`（管理员）/ `isAdmin` / `needsSetup`（登录与权限）、`collapsed`、`zoom`、`dayWidthScale`（日视图 1× / 2× / 3×）、`view`、`standupMode`（晨会聚焦）、`filter`、`selectedId`、`modal`（含 `login` / `users`）、`history/future`（撤销栈）、`toast`。
+`boot`（全局）、`detail`（当前项目全量任务）、`user` / `canEdit`（当前项目）/ `canAdminCurrent`（当前项目管理员）/ `canEditGlobal`（全局管理员）/ `isAdmin` / `needsSetup`（登录与权限）、`collapsed`、`zoom`、`dayWidthScale`（日视图 1× / 2× / 3×）、`view`、`standupMode`（晨会聚焦）、`filter`、`selectedId`、`modal`（含 `login` / `users` / `projectSettings`）、`history/future`（撤销栈）、`toast`。
 
 所有写操作统一走 store 的 action（`patchTask` / `addTask` / `commitDates` / `removeTask`…），内部都是「调接口 → `refreshProject()` 重拉」。**没有做乐观更新**，本地延迟极低，简单优先。
 
 **登录态**：`init()` / `refreshAll()` / `openProject()` 从 `bootstrap.auth` 和当前项目 id 计算：
 
 ```ts
-canEdit       = user.role === 'admin' || user.projectIds.includes(projectId)  // 任务/甘特/导入
-canEditGlobal = user.role === 'admin'                                       // 人员/日历/新建项目
+canEditCurrent  = user.role === 'admin' || user.projectIds.includes(projectId)       // 任务/甘特/导入
+canAdminCurrent = user.role === 'admin' || user.projectAdminIds.includes(projectId)  // 项目设置/成员
+canEditGlobal   = user.role === 'admin'                                              // 人员/日历/新建项目
 ```
 
 `api.ts` 里的 401 处理器会弹登录框。所有写 action 开头都有 `requireEdit(get)` 兜底：未登录时提示并打开登录弹窗，已登录但没分到项目时提示联系管理员，都不发请求。只读 UI 的入口在 `TopBar`（只读徽标 + 登录按钮 / 账号菜单），各编辑组件按对应开关隐藏或禁用控件；`PeopleModal` / `CalendarModal` 用 `canEditGlobal`，其余用 `canEdit`。
@@ -520,7 +526,9 @@ return document.querySelector('aside')?.innerText.slice(0, 80);
 | 变更日志 | `apps/api/src/lib/log.ts`、`ChangesModal.tsx` |
 | 登录 / 会话 / 登录拦截 / 项目权限判断 | `apps/api/src/lib/auth.ts` |
 | 登录 / 账号管理 / 项目分配接口 | `apps/api/src/routes.auth.ts` |
-| 登录弹窗 / 用户管理与项目勾选 | `apps/web/src/components/LoginModal.tsx`、`UsersModal.tsx` |
+| 项目信息 / 项目成员接口 | `apps/api/src/routes.ts` |
+| 登录弹窗 / 用户管理与项目角色 | `apps/web/src/components/LoginModal.tsx`、`UsersModal.tsx` |
+| 项目设置 / 成员弹窗 | `apps/web/src/components/ProjectSettingsModal.tsx` |
 | 只读态 UI | `apps/web/src/components/TopBar.tsx`、`Board.tsx`、`TaskDrawer.tsx`、`PeopleModal.tsx`、`CalendarModal.tsx` |
 | 表结构 | `apps/api/src/db/schema.ts` |
 | 演示数据 | `apps/api/src/db/seed.ts` |
