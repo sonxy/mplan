@@ -5,5 +5,6 @@ export * from './tree.js';
 export * from './axis.js';
 export * from './palette.js';
 export * from './derive.js';
+export * from './shift.js';
 export * from './holidays-cn.js';
 export * from './csv.js';

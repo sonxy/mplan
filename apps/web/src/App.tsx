@@ -127,7 +127,11 @@ function Toast() {
     <div
       className={clsx(
         'animate-fade-up fixed top-[62px] left-1/2 z-[120] -translate-x-1/2 rounded-lg px-3 py-1.5 text-[12px] font-medium shadow-lg',
-        toast.kind === 'error' ? 'bg-rose-600 text-white' : 'bg-stone-900 text-white',
+        toast.kind === 'error'
+          ? 'bg-rose-600 text-white'
+          : toast.kind === 'warn'
+            ? 'bg-amber-500 text-white'
+            : 'bg-stone-900 text-white',
       )}
     >
       {toast.text}

@@ -9,6 +9,7 @@ import {
   calendarFor,
   codeSegments,
   compareCodes,
+  computeAutoShift,
   countWorkdays,
   parentCode,
   nextWorkday,
@@ -17,7 +18,7 @@ import {
   todayStr,
 } from '@mplan/core';
 import { z } from 'zod';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { db } from './db/client.js';
 import {
   calendarExceptions,
@@ -30,7 +31,7 @@ import {
   tasks,
   users,
 } from './db/schema.js';
-import { actorOf, writeLog } from './lib/log.js';
+import { actorOf, writeLog, type LogAction } from './lib/log.js';
 import {
   canAdminProject,
   countUsers,
@@ -74,6 +75,22 @@ const overrideItem = z.object({
   work: z.boolean(),
   hours: z.number().min(0).max(24).nullable().optional(),
   note: z.string().max(120).nullable().optional(),
+});
+
+/** CSV 导入的一行；追加导入和重新初始化共用 */
+const importRowBody = z.object({
+  /** WBS 编号：1 / 1.2 / 1.2.3，最多 4 段 */
+  code: z.string().min(1).max(24),
+  kind: z.enum(['task', 'milestone']).optional(),
+  name: z.string().min(1).max(200),
+  owner: z.string().max(60).nullable().optional(),
+  hours: z.number().min(0).max(10000).optional(),
+  /** 工时单元格是否非空：非空时按工时优先，不用结束日反算 */
+  hoursProvided: z.boolean().optional(),
+  start: dateStr.optional(),
+  due: dateStr.optional(),
+  done: z.boolean().optional(),
+  note: z.string().max(4000).nullable().optional(),
 });
 
 function httpError(message: string, statusCode = 400): Error {
@@ -564,6 +581,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         note: z.string().max(4000).nullable().optional(),
         /** none = 严格按传入值写入（拖拽平移用），hours / due = 按对应字段重算 */
         recalc: z.enum(['none', 'hours', 'due']).optional(),
+        /** 改期时是否联动顺延后续任务（前端联动开关打开时传 true） */
+        shiftFollowing: z.boolean().optional(),
       }),
       req.body,
     );
@@ -628,23 +647,84 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     const doneAt = body.done === undefined ? current.doneAt : body.done ? new Date() : null;
 
-    await db
-      .update(tasks)
-      .set({
-        name: body.name ?? current.name,
-        ownerId,
-        estimateHours: String(estimateHours),
-        startDate,
-        dueDate,
-        kind,
-        progressMode: body.progressMode ?? current.progressMode,
-        manualProgress:
-          body.manualProgress !== undefined ? body.manualProgress : current.manualProgress,
-        doneAt,
-        note: body.note !== undefined ? body.note : current.note,
-        updatedAt: new Date(),
-      })
-      .where(eq(tasks.id, id));
+    // 只有“改日期 / 改工时”才触发联动；改名称、负责人、类型、完成状态都不推后续任务。
+    const dateEdit =
+      body.startDate !== undefined ||
+      body.dueDate !== undefined ||
+      body.estimateHours !== undefined ||
+      body.recalc !== undefined;
+    const mayShift =
+      body.shiftFollowing === true &&
+      dateEdit &&
+      !hasChildren &&
+      !doneAt &&
+      (body.kind === undefined || body.kind === current.kind) &&
+      dueDate > current.dueDate;
+
+    let autoShift: { deltaWorkdays: number; count: number } | null = null;
+    let shiftTargets: Array<{ taskId: string; startDate: string; dueDate: string }> = [];
+
+    if (mayShift) {
+      const allTaskOverrides = await loadTaskOverrides(all.map((t) => t.id));
+      // 用更新后的负责人 / 完成状态参与匹配；任务本身会被 computeAutoShift 排除
+      const shiftTasks = all.map((t) =>
+        t.id === id
+          ? {
+              ...t,
+              ownerId,
+              startDate,
+              dueDate,
+              estimateHours,
+              doneAt: null,
+            }
+          : t,
+      );
+      const result = computeAutoShift({
+        tasks: shiftTasks,
+        taskId: id,
+        oldDueDate: current.dueDate,
+        newDueDate: dueDate,
+        company,
+        personOverrides,
+        taskOverrides: allTaskOverrides,
+      });
+      shiftTargets = result.targets;
+      if (result.targets.length > 0) {
+        autoShift = { deltaWorkdays: result.deltaWorkdays, count: result.targets.length };
+      }
+    }
+
+    // 主任务和联动任务放在同一个事务里，避免改了一半
+    await db.transaction(async (tx) => {
+      await tx
+        .update(tasks)
+        .set({
+          name: body.name ?? current.name,
+          ownerId,
+          estimateHours: String(estimateHours),
+          startDate,
+          dueDate,
+          kind,
+          progressMode: body.progressMode ?? current.progressMode,
+          manualProgress:
+            body.manualProgress !== undefined ? body.manualProgress : current.manualProgress,
+          doneAt,
+          note: body.note !== undefined ? body.note : current.note,
+          updatedAt: new Date(),
+        })
+        .where(eq(tasks.id, id));
+
+      for (const target of shiftTargets) {
+        await tx
+          .update(tasks)
+          .set({
+            startDate: target.startDate,
+            dueDate: target.dueDate,
+            updatedAt: new Date(),
+          })
+          .where(eq(tasks.id, target.taskId));
+      }
+    });
 
     await recomputeParentRanges(current.projectId);
 
@@ -656,7 +736,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       projectId: string;
       taskId: string;
       taskName: string;
-      action: 'update';
+      action: LogAction;
       field: string;
       before: string;
       after: string;
@@ -677,11 +757,83 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     if (Boolean(current.doneAt) !== Boolean(doneAt))
       push('done', current.doneAt ? '已完成' : '未完成', doneAt ? '已完成' : '未完成');
     if (body.note !== undefined && (body.note ?? '') !== (current.note ?? '')) push('note', '备注', '已修改');
+    if (autoShift) {
+      entries.push({
+        projectId: current.projectId,
+        taskId: id,
+        taskName,
+        action: 'postpone',
+        field: 'dates',
+        before: `${autoShift.count} 个后续任务`,
+        after: `+${autoShift.deltaWorkdays} 个工作日`,
+      });
+    }
 
     await writeLog(entries, actorOf(req));
 
     const [row] = await db.select().from(tasks).where(eq(tasks.id, id)).limit(1);
-    return { task: toTask(row) };
+    return { task: toTask(row), autoShift, shiftedTaskIds: shiftTargets.map((t) => t.taskId) };
+  });
+
+  /**
+   * 批量恢复日期：撤销 / 重做一次联动时，把涉及的多个任务原子地改回快照。
+   * 只写日期和工时，不触发联动，避免撤销时又推一遍。
+   */
+  app.put('/api/projects/:id/task-dates', async (req) => {
+    const { id: projectId } = req.params as { id: string };
+    requireProjectAccess(req, projectId);
+    const body = parse(
+      z.object({
+        tasks: z
+          .array(
+            z.object({
+              id: z.string().min(1).max(36),
+              startDate: dateStr,
+              dueDate: dateStr,
+              estimateHours: z.number().min(0).max(10000),
+            }),
+          )
+          .min(1)
+          .max(500),
+      }),
+      req.body,
+    );
+
+    const all = await listTasks(projectId);
+    const byId = new Map(all.map((t) => [t.id, t]));
+    for (const item of body.tasks) {
+      if (!byId.has(item.id)) throw httpError('任务不属于这个项目', 400);
+      if (item.dueDate < item.startDate) throw httpError('结束日不能早于开始日', 400);
+    }
+
+    await db.transaction(async (tx) => {
+      for (const item of body.tasks) {
+        await tx
+          .update(tasks)
+          .set({
+            startDate: item.startDate,
+            dueDate: item.dueDate,
+            estimateHours: String(item.estimateHours),
+            updatedAt: new Date(),
+          })
+          .where(eq(tasks.id, item.id));
+      }
+    });
+    await recomputeParentRanges(projectId);
+    await writeLog(
+      [
+        {
+          projectId,
+          taskName: '批量日期调整',
+          action: 'update',
+          field: 'dates',
+          before: '撤销 / 重做',
+          after: `${body.tasks.length} 个任务`,
+        },
+      ],
+      actorOf(req),
+    );
+    return { ok: true };
   });
 
   /**
@@ -810,23 +962,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
           })
           .optional(),
         autoCreatePersons: z.boolean().optional(),
-        rows: z
-          .array(
-            z.object({
-              /** WBS 编号：1 / 1.2 / 1.2.3，最多 4 段 */
-              code: z.string().min(1).max(24),
-              kind: z.enum(['task', 'milestone']).optional(),
-              name: z.string().min(1).max(200),
-              owner: z.string().max(60).nullable().optional(),
-              hours: z.number().min(0).max(10000).optional(),
-              start: dateStr.optional(),
-              due: dateStr.optional(),
-              done: z.boolean().optional(),
-              note: z.string().max(4000).nullable().optional(),
-            }),
-          )
-          .min(1)
-          .max(500),
+        rows: z.array(importRowBody).min(1).max(500),
       }),
       req.body,
     );
@@ -868,6 +1004,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     const sortCounters = new Map<string, number>();
     const idByCode = new Map<string, string>();
+    const parentCodes = new Set(
+      body.rows.map((r) => parentCode(r.code)).filter((c): c is string => Boolean(c)),
+    );
+    const warnings: string[] = [];
     let created = 0;
 
     // 行顺序无所谓：按编号排序后，父节点一定先于子节点出现
@@ -908,18 +1048,31 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const kind = r.kind ?? 'task';
+      const hoursProvided = r.hoursProvided ?? (r.hours !== undefined && r.hours > 0);
       const hours = kind === 'milestone' ? 0 : (r.hours ?? 0);
       const cal = calendarFor(company, ownerId ? personOverrides[ownerId] : null);
       const start = r.start ?? projectStart;
+      // 工时单元格非空时工时优先：1h 就是 1h，不因为日期跨度是 1 天被反算成 8h
       const schedule =
         kind === 'milestone'
           ? (() => {
               const s = nextWorkday(start, cal);
               return { startDate: s, dueDate: s, estimateHours: 0 };
             })()
-          : r.due
+          : r.due && !hoursProvided
             ? rescheduleByDue(start, r.due, cal)
             : rescheduleByHours(start, hours, cal);
+      if (
+        kind === 'task' &&
+        !parentCodes.has(r.code) &&
+        hoursProvided &&
+        r.due &&
+        schedule.dueDate !== r.due
+      ) {
+        warnings.push(
+          `编号 ${r.code}：工时 ${hours}h 按 8h/天算到 ${schedule.dueDate}，CSV 结束日是 ${r.due}，已按工时`,
+        );
+      }
 
       const sortKey = parentId ?? '__root__';
       const sort = sortCounters.get(sortKey) ?? 0;
@@ -970,7 +1123,184 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     );
 
     reply.code(201);
-    return { projectId, created, personsCreated };
+    return { projectId, created, personsCreated, warnings: warnings.slice(0, 20) };
+  });
+
+  /**
+   * 重新初始化项目：保留项目信息 / 成员 / 权限，删除当前项目全部任务和变更日志，
+   * 再按 CSV 重建一棵任务树。适合排计划初期整版覆盖。
+   * 所有校验和写入都在同一个事务里，CSV 有问题时不会破坏旧计划。
+   */
+  app.post('/api/projects/:id/reinitialize', async (req) => {
+    const { id: projectId } = req.params as { id: string };
+    requireProjectAdmin(req, projectId);
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+    if (!project) throw httpError('项目不存在', 404);
+
+    const body = parse(
+      z.object({
+        autoCreatePersons: z.boolean().optional(),
+        updateProjectDue: z.boolean().optional(),
+        rows: z.array(importRowBody).min(1).max(500),
+      }),
+      req.body,
+    );
+
+    const all = await listTasks(projectId);
+    const company = await loadCompany();
+    const personOverrides = await loadPersonOverrides();
+    const personList = await listPersons();
+    const byName = new Map(personList.map((p) => [p.name, p.id]));
+    const palette = ['teal', 'indigo', 'amber', 'rose', 'sky', 'violet', 'lime', 'orange', 'cyan'];
+    const usedColors = new Set(personList.map((p) => p.color));
+    const newPersons: Array<typeof persons.$inferInsert> = [];
+    const values: Array<typeof tasks.$inferInsert> = [];
+    const warnings: string[] = [];
+
+    const sortedRows = [...body.rows].sort((a, b) => compareCodes(a.code, b.code));
+    const parentCodes = new Set<string>();
+    for (const r of sortedRows) {
+      const pc = parentCode(r.code);
+      if (pc) parentCodes.add(pc);
+    }
+
+    const projectStart = body.rows.find((r) => r.start)?.start ?? project.startDate;
+    const idByCode = new Map<string, string>();
+    const sortCounters = new Map<string, number>();
+    let maxDue = '';
+
+    for (let i = 0; i < sortedRows.length; i++) {
+      const r = sortedRows[i];
+      const segments = codeSegments(r.code);
+      if (!segments) throw httpError(`第 ${i + 1} 行：编号「${r.code}」格式不对`);
+      if (segments.length > MAX_DEPTH) {
+        throw httpError(`第 ${i + 1} 行：编号 ${r.code} 超过 ${MAX_DEPTH} 层`);
+      }
+      if (idByCode.has(r.code)) throw httpError(`第 ${i + 1} 行：编号 ${r.code} 重复`);
+
+      const pc = parentCode(r.code);
+      const parentId = pc ? (idByCode.get(pc) ?? null) : null;
+      if (pc && !parentId) throw httpError(`第 ${i + 1} 行：编号 ${r.code} 的上级 ${pc} 不存在`);
+
+      let ownerId: string | null = null;
+      const ownerName = r.owner?.trim();
+      if (ownerName) {
+        ownerId = byName.get(ownerName) ?? null;
+        if (!ownerId) {
+          if (!body.autoCreatePersons) {
+            throw httpError(`第 ${i + 1} 行：负责人「${ownerName}」不存在`);
+          }
+          ownerId = randomUUID();
+          const color = palette.find((c) => !usedColors.has(c)) ?? 'slate';
+          usedColors.add(color);
+          newPersons.push({
+            id: ownerId,
+            name: ownerName,
+            role: null,
+            color,
+            dailyHours: '8.00',
+            active: true,
+            sort: personList.length + newPersons.length,
+          });
+          byName.set(ownerName, ownerId);
+        }
+      }
+
+      const kind = r.kind ?? 'task';
+      const hoursProvided = r.hoursProvided ?? (r.hours !== undefined && r.hours > 0);
+      const hours = kind === 'milestone' ? 0 : (r.hours ?? 0);
+      const cal = calendarFor(company, ownerId ? personOverrides[ownerId] : null);
+      const start = r.start ?? projectStart;
+      // 工时单元格非空时工时优先：1h 就是 1h，不因为日期跨度是 1 天被反算成 8h
+      const schedule =
+        kind === 'milestone'
+          ? (() => {
+              const s = nextWorkday(start, cal);
+              return { startDate: s, dueDate: s, estimateHours: 0 };
+            })()
+          : r.due && !hoursProvided
+            ? rescheduleByDue(start, r.due, cal)
+            : rescheduleByHours(start, hours, cal);
+      if (
+        kind === 'task' &&
+        !parentCodes.has(r.code) &&
+        hoursProvided &&
+        r.due &&
+        schedule.dueDate !== r.due
+      ) {
+        warnings.push(
+          `编号 ${r.code}：工时 ${hours}h 按 8h/天算到 ${schedule.dueDate}，CSV 结束日是 ${r.due}，已按工时`,
+        );
+      }
+
+      const sortKey = parentId ?? '__root__';
+      const sort = sortCounters.get(sortKey) ?? 0;
+      sortCounters.set(sortKey, sort + 1);
+
+      const id = randomUUID();
+      values.push({
+        id,
+        projectId,
+        parentId,
+        depth: segments.length,
+        sort,
+        name: r.name,
+        ownerId,
+        // 父节点工时没有业务意义；日期会由 recomputeParentRanges 汇总
+        estimateHours: parentCodes.has(r.code) ? '0.00' : String(schedule.estimateHours),
+        startDate: schedule.startDate,
+        dueDate: schedule.dueDate,
+        kind,
+        progressMode: 'auto',
+        manualProgress: null,
+        doneAt: r.done ? new Date() : null,
+        note: r.note ?? null,
+      });
+      idByCode.set(r.code, id);
+      if (!parentCodes.has(r.code) && schedule.dueDate > maxDue) maxDue = schedule.dueDate;
+    }
+
+    const deleted = all.length;
+    const oldTaskIds = all.map((t) => t.id);
+    const nextProjectDue = body.updateProjectDue && maxDue ? maxDue : project.dueDate;
+
+    await db.transaction(async (tx) => {
+      if (oldTaskIds.length > 0) {
+        await tx
+          .delete(dayOverrides)
+          .where(and(eq(dayOverrides.scope, 'task'), inArray(dayOverrides.scopeId, oldTaskIds)));
+      }
+      await tx.delete(changeLog).where(eq(changeLog.projectId, projectId));
+      await tx.delete(tasks).where(eq(tasks.projectId, projectId));
+      if (newPersons.length > 0) await tx.insert(persons).values(newPersons);
+      await tx.insert(tasks).values(values);
+      await tx
+        .update(projects)
+        .set({ dueDate: nextProjectDue, updatedAt: new Date() })
+        .where(eq(projects.id, projectId));
+      await tx.insert(changeLog).values({
+        id: randomUUID(),
+        projectId,
+        taskId: null,
+        taskName: '重新初始化项目',
+        action: 'import',
+        field: null,
+        beforeValue: `删除 ${deleted} 个任务`,
+        afterValue: `导入 ${values.length} 行`,
+        actor: actorOf(req),
+      });
+    });
+
+    await recomputeParentRanges(projectId);
+
+    return {
+      projectId,
+      created: values.length,
+      deleted,
+      personsCreated: newPersons.length,
+      projectDueDate: nextProjectDue,
+      warnings: warnings.slice(0, 20),
+    };
   });
 
   // ---------- 变更日志 ----------

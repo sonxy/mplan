@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   ArchiveRestore,
@@ -9,6 +9,7 @@ import {
   Diamond,
   Download,
   History,
+  Link2,
   LogIn,
   LogOut,
   Plus,
@@ -19,9 +20,10 @@ import {
   Users,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { buildProjectCsv, csvFileName, formatCN } from '@mplan/core';
+import { buildProjectCsv, csvFileName, formatCN, projectOverdueWorkdays } from '@mplan/core';
 import { useApp } from '../store';
 import { downloadTextFile } from '../lib/download';
+import { companyFromBootstrap } from '../lib/gantt';
 import { Button, IconButton, Segmented } from './ui';
 
 function ProjectMenu() {
@@ -53,6 +55,10 @@ function ProjectMenu() {
 
   const current = detail?.project;
   const archived = boot?.archivedProjects ?? [];
+  const overdue = useMemo(() => {
+    if (!detail || !boot) return 0;
+    return projectOverdueWorkdays(detail.tasks, detail.project.dueDate, companyFromBootstrap(boot));
+  }, [detail, boot]);
 
   return (
     <div className="relative" ref={ref}>
@@ -71,6 +77,18 @@ function ProjectMenu() {
         {current?.archivedAt && (
           <span className="rounded border border-amber-200 bg-amber-50 px-1 py-px text-[10px] font-medium text-amber-700">
             已归档
+          </span>
+        )}
+        {overdue > 0 && (
+          <span
+            className="rounded border border-amber-200 bg-amber-50 px-1 py-px text-[10px] font-medium whitespace-nowrap text-amber-700"
+            title={
+              detail?.project.dueDate
+                ? `项目计划完成日 ${detail.project.dueDate}，未完成任务的结束日已经超过它`
+                : undefined
+            }
+          >
+            超期 {overdue} 天
           </span>
         )}
         <ChevronDown size={14} className="text-ink-3" />
@@ -343,6 +361,8 @@ export function TopBar() {
     user,
     dayWidthScale,
     setDayWidthScale,
+    autoShift,
+    setAutoShift,
   } = useApp();
 
   return (
@@ -405,6 +425,27 @@ export function TopBar() {
         )}
 
         <div className="h-4 w-px bg-line" />
+
+        {canEdit && (
+          <button
+            onClick={() => setAutoShift(!autoShift)}
+            aria-pressed={autoShift}
+            title={
+              autoShift
+                ? '改期联动后续：已开启。改日期会自动顺延同一负责人 / 同一父级分支的后续任务，点击关闭'
+                : '改期联动后续：已关闭。改日期只动当前任务，点击开启'
+            }
+            className={clsx(
+              'flex h-7 items-center gap-1 rounded-md px-2 text-[11.5px] font-medium transition-colors',
+              autoShift
+                ? 'bg-teal-50 text-brand hover:bg-teal-100'
+                : 'text-ink-3 hover:bg-stone-100 hover:text-ink-2',
+            )}
+          >
+            <Link2 size={13} />
+            <span className="hidden xl:inline">联动</span>
+          </button>
+        )}
 
         {canEdit && (
           <IconButton
