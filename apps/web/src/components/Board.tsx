@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
 import { AlertTriangle, Check, ChevronRight, Plus, X, Zap } from 'lucide-react';
-import { addWorkdays, calendarFor, countWorkdays, formatCN } from '@mplan/core';
+import { addWorkdays, calendarFor, computeAutoShift, countWorkdays, formatCN } from '@mplan/core';
 import { useApp } from '../store';
 import {
   type Board as BoardModel,
@@ -77,7 +77,7 @@ function statusTone(row: BoardRow) {
   return { body: 'bg-white', accent: row.color.bar, text: 'text-ink' };
 }
 
-function Bar({
+const Bar = memo(function Bar({
   row,
   board,
   colWidth,
@@ -86,27 +86,32 @@ function Bar({
   onSelect,
   onToggleDone,
   onDragStart,
-  preview,
+  previewStart,
+  previewDue,
   dragging,
+  ghost,
 }: {
   row: BoardRow;
   board: BoardModel;
   colWidth: number;
   selected: boolean;
   canEdit: boolean;
-  onSelect: () => void;
-  onToggleDone: () => void;
-  onDragStart: (mode: DragMode, e: React.PointerEvent) => void;
-  preview?: { start: string; due: string } | null;
+  onSelect: (id: string) => void;
+  onToggleDone: (row: BoardRow) => void;
+  onDragStart: (row: BoardRow, mode: DragMode, e: React.PointerEvent) => void;
+  previewStart: string | null;
+  previewDue: string | null;
   dragging?: boolean;
+  /** 联动预览：画在新位置，但不响应指针 */
+  ghost?: boolean;
 }) {
   // 筛选时仅作为上下文出现的祖先不画条，避免误以为它也命中了
-  if (row.dimmed && !dragging) return null;
+  if (row.dimmed && !dragging && !ghost) return null;
 
   const geom = barGeometry(
     board.axis,
-    preview?.start ?? row.task.startDate,
-    preview?.due ?? row.task.dueDate,
+    previewStart ?? row.task.startDate,
+    previewDue ?? row.task.dueDate,
     colWidth,
   );
   if (!geom) return null;
@@ -132,7 +137,7 @@ function Bar({
       <div
         className="absolute top-1/2 z-10 -translate-y-1/2 cursor-pointer"
         style={{ left: range.left + 1, width: Math.max(range.width - 2, 8) }}
-        onClick={onSelect}
+        onClick={() => onSelect(row.task.id)}
         title={title}
       >
         <div className="relative h-[7px] rounded-[2px] bg-stone-200">
@@ -159,26 +164,30 @@ function Bar({
       <>
         <div
           className={clsx(
-            'absolute top-1/2 z-10 h-[15px] w-[15px] -translate-x-1/2 -translate-y-1/2 rotate-45 rounded-[3px] border-2 transition-shadow',
-            canEdit ? 'cursor-grab' : 'cursor-pointer',
+            'absolute top-1/2 z-10 h-[15px] w-[15px] -translate-x-1/2 -translate-y-1/2 rotate-45 rounded-[3px] border-2 transition-shadow gantt-bar',
+            canEdit && !ghost ? 'cursor-grab' : 'cursor-pointer',
             gem,
             dragging && 'shadow-lg ring-2 ring-brand/40',
+            ghost && 'pointer-events-none border-dashed opacity-50',
             row.dimmed && 'opacity-40',
           )}
           style={{ left: cx }}
           onPointerDown={(e) => {
             if (!canEdit) {
-              onSelect();
+              onSelect(row.task.id);
               return;
             }
-            onDragStart('move', e);
+            onDragStart(row, 'move', e);
           }}
           title={title}
+          data-dragging={dragging ? '1' : undefined}
+          data-selected={selected ? '1' : undefined}
         />
         <span
           className={clsx(
             'pointer-events-none absolute top-1/2 z-10 -translate-y-1/2 text-[10.5px] whitespace-nowrap',
             row.status === 'overdue' ? 'text-rose-600' : 'text-ink-2',
+            ghost && 'opacity-50',
             row.dimmed && 'opacity-40',
           )}
           style={{ left: cx + 13 }}
@@ -193,14 +202,15 @@ function Bar({
     <>
     <div
       className={clsx(
-        'absolute top-1/2 z-10 flex h-[26px] -translate-y-1/2 items-center overflow-hidden rounded-[7px] border transition-shadow',
-        canEdit ? 'cursor-pointer' : 'cursor-default',
+        'absolute top-1/2 z-10 flex h-[26px] -translate-y-1/2 items-center overflow-hidden rounded-[7px] border transition-shadow gantt-bar',
+        canEdit && !ghost ? 'cursor-pointer' : 'cursor-default',
         tone.body,
         dragging
           ? 'z-40 cursor-grabbing shadow-[0_0_0_2px_rgba(15,118,110,0.55),0_10px_24px_-8px_rgba(28,25,23,0.45)]'
           : selected
             ? 'shadow-[0_0_0_2px_rgba(15,118,110,0.35)]'
             : 'shadow-[0_1px_1px_rgba(28,25,23,0.04)] hover:shadow-md',
+        ghost && 'pointer-events-none border-dashed opacity-55',
         row.status === 'overdue' && 'border-rose-300',
         row.status === 'done' && 'border-emerald-200',
         row.status === 'todo' && 'border-stone-300/70',
@@ -214,13 +224,15 @@ function Bar({
       }}
       onPointerDown={(e) => {
         if (!canEdit) {
-          onSelect();
+          onSelect(row.task.id);
           return;
         }
-        onDragStart('move', e);
+        onDragStart(row, 'move', e);
       }}
-      title={dragging ? undefined : title}
+      title={dragging ? undefined : ghost ? '联动预览' : title}
       data-dragging={dragging ? '1' : undefined}
+      data-ghost={ghost ? '1' : undefined}
+      data-selected={selected ? '1' : undefined}
     >
       <div
         className="absolute inset-y-0 left-0"
@@ -228,16 +240,16 @@ function Bar({
       />
       <div className="absolute inset-y-0 left-0 w-[3px]" style={{ background: tone.accent }} />
 
-      {canEdit && width > 30 && (
+      {canEdit && !ghost && width > 30 && (
         <>
           <div
             className="absolute inset-y-0 left-0 z-20 w-[7px] cursor-ew-resize"
-            onPointerDown={(e) => onDragStart('resize-start', e)}
+            onPointerDown={(e) => onDragStart(row, 'resize-start', e)}
             title="拖动左边改开始时间"
           />
           <div
             className="absolute inset-y-0 right-0 z-20 w-[7px] cursor-ew-resize"
-            onPointerDown={(e) => onDragStart('resize-end', e)}
+            onPointerDown={(e) => onDragStart(row, 'resize-end', e)}
             title="拖动右边改结束时间"
           />
         </>
@@ -272,12 +284,12 @@ function Bar({
     </div>
 
     {/* 需求 6：甘特条上直接改完成状态（只读模式隐藏） */}
-    {canEdit && (
+    {canEdit && !ghost && (
     <button
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => {
         e.stopPropagation();
-        onToggleDone();
+        onToggleDone(row);
       }}
       title={row.status === 'done' ? '取消完成' : '标记完成'}
       className={clsx(
@@ -293,9 +305,9 @@ function Bar({
     )}
     </>
   );
-}
+});
 
-function TaskCell({
+const TaskCell = memo(function TaskCell({
   row,
   selected,
   canEdit,
@@ -310,9 +322,9 @@ function TaskCell({
   row: BoardRow;
   selected: boolean;
   canEdit: boolean;
-  onSelect: () => void;
-  onToggle: () => void;
-  onAddChild: () => void;
+  onSelect: (id: string) => void;
+  onToggle: (id: string) => void;
+  onAddChild: (id: string) => void;
   expanded: boolean;
   indent: number;
   compact: boolean;
@@ -339,7 +351,7 @@ function TaskCell({
         row.dimmed && 'opacity-45',
       )}
       style={{ width: LEFT_WIDTH }}
-      onClick={onSelect}
+      onClick={() => onSelect(row.task.id)}
     >
       <div
         className="flex min-w-0 flex-1 items-center gap-1 pr-2"
@@ -349,7 +361,7 @@ function TaskCell({
           <button
             onClick={(e) => {
               e.stopPropagation();
-              onToggle();
+              onToggle(row.task.id);
             }}
             className="grid h-4 w-4 shrink-0 place-items-center rounded text-ink-3 hover:bg-stone-200/70 hover:text-ink"
             aria-label={expanded ? '收起' : '展开'}
@@ -382,7 +394,7 @@ function TaskCell({
           <button
             onClick={(e) => {
               e.stopPropagation();
-              onAddChild();
+              onAddChild(row.task.id);
             }}
             className="ml-1 grid h-4 w-4 shrink-0 place-items-center rounded text-ink-3 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-teal-100 hover:text-brand"
             title="添加子任务"
@@ -441,7 +453,101 @@ function TaskCell({
       </div>
     </div>
   );
+});
+
+interface BoardTaskRowProps {
+  rr: Extract<RenderRow, { kind: 'task' }>;
+  board: BoardModel;
+  colWidth: number;
+  timelineWidth: number;
+  selected: boolean;
+  canEdit: boolean;
+  faded: boolean;
+  expanded: boolean;
+  previewStart: string | null;
+  previewDue: string | null;
+  dragging: boolean;
+  ghost: boolean;
+  onSelect: (id: string) => void;
+  onToggle: (id: string) => void;
+  onAddChild: (id: string) => void;
+  onToggleDone: (row: BoardRow) => void;
+  onDragStart: (row: BoardRow, mode: DragMode, e: React.PointerEvent) => void;
 }
+
+/**
+ * 单行任务。拖拽时只有被拖的任务和 ghost 任务需要重渲染，
+ * 其余行通过 memo + 稳定回调直接跳过。
+ */
+const BoardTaskRow = memo(function BoardTaskRow({
+  rr,
+  board,
+  colWidth,
+  timelineWidth,
+  selected,
+  canEdit,
+  faded,
+  expanded,
+  previewStart,
+  previewDue,
+  dragging,
+  ghost,
+  onSelect,
+  onToggle,
+  onAddChild,
+  onToggleDone,
+  onDragStart,
+}: BoardTaskRowProps) {
+  const row = rr.row;
+  const isModule = !rr.compact && rr.indent === 0;
+  return (
+    <div
+      className={clsx(
+        'group gantt-row flex border-b border-line-soft/80 transition-opacity',
+        isModule && 'border-t border-line',
+        faded && 'opacity-30',
+      )}
+      style={{ height: ROW_HEIGHT }}
+    >
+      <TaskCell
+        row={row}
+        selected={selected}
+        canEdit={canEdit}
+        onSelect={onSelect}
+        onToggle={onToggle}
+        onAddChild={onAddChild}
+        expanded={expanded}
+        indent={rr.indent}
+        compact={rr.compact}
+        showOwner={rr.showOwner}
+      />
+
+      <div
+        className={clsx(
+          'relative shrink-0 transition-colors',
+          selected ? 'bg-teal-500/[0.05]' : 'group-hover:bg-stone-900/[0.022]',
+          isModule && !selected && 'bg-stone-900/[0.015]',
+        )}
+        style={{ width: timelineWidth }}
+      >
+        <Bar
+          row={row}
+          board={board}
+          colWidth={colWidth}
+          selected={selected}
+          canEdit={canEdit}
+          onSelect={onSelect}
+          onToggleDone={onToggleDone}
+          onDragStart={onDragStart}
+          previewStart={previewStart}
+          previewDue={previewDue}
+          dragging={dragging}
+          ghost={ghost}
+        />
+      </div>
+    </div>
+  );
+});
 
 export function Board() {
   const {
@@ -466,6 +572,7 @@ export function Board() {
     setModal,
     standupMode,
     setStandupMode,
+    autoShift,
   } = useApp();
   const scroller = useRef<HTMLDivElement>(null);
   const lastProject = useRef<string | null>(null);
@@ -517,6 +624,58 @@ export function Board() {
     }
     return buildPeopleRows(board, boot.persons, detail);
   }, [board, boot, detail, view]);
+
+  // 拖拽中的联动预览：和落库用同一个 core 纯函数，避免预览和结果不一致
+  const ghostShift = useMemo(() => {
+    if (!drag || !board || !detail || !autoShift || !canEdit) return null;
+    const primary = detail.tasks.find((t) => t.id === drag.id);
+    if (!primary) return null;
+    const result = computeAutoShift({
+      tasks: detail.tasks,
+      taskId: drag.id,
+      oldDueDate: primary.dueDate,
+      newDueDate: drag.due,
+      company: board.company,
+      personOverrides: detail.personOverrides,
+      taskOverrides: detail.taskOverrides,
+    });
+    return result.targets.length
+      ? new Map(result.targets.map((target) => [target.taskId, target]))
+      : null;
+  }, [drag, board, detail, autoShift, canEdit]);
+
+  const months = useMemo(
+    () => (board ? monthSegments(board.axis, colWidth) : []),
+    [board, colWidth],
+  );
+  const overtimeCols = useMemo(
+    () => (board ? board.axis.columns.filter((c) => c.overtime) : []),
+    [board],
+  );
+
+  // 行组件用 memo；回调和拖拽入口必须保持引用稳定，否则 memo 会被新函数打破
+  const startDragRef = useRef<(row: BoardRow, mode: DragMode, e: React.PointerEvent) => void>(
+    () => {},
+  );
+  const handleDragStart = useCallback(
+    (row: BoardRow, mode: DragMode, e: React.PointerEvent) =>
+      startDragRef.current(row, mode, e),
+    [],
+  );
+  const handleSelect = useCallback((id: string) => select(id), [select]);
+  const handleToggle = useCallback((id: string) => toggle(id), [toggle]);
+  const handleAddChild = useCallback(
+    (id: string) => {
+      void addTask(id);
+    },
+    [addTask],
+  );
+  const handleToggleDone = useCallback(
+    (row: BoardRow) => {
+      void patchTask(row.task.id, { done: row.status !== 'done' });
+    },
+    [patchTask],
+  );
 
   const bodyHeight = renderRows.length * ROW_HEIGHT;
 
@@ -653,8 +812,6 @@ export function Board() {
     );
   }
 
-  const months = monthSegments(board.axis, colWidth);
-  const overtimeCols = board.axis.columns.filter((c) => c.overtime);
   const leafOverdue = board.rows.filter((r) => !r.summary && r.status === 'overdue').length;
 
   /**
@@ -692,13 +849,15 @@ export function Board() {
     dragSession.current = session;
 
     let lastClientX = e.clientX;
+    let pendingClientX = e.clientX;
     let raf = 0;
+    let rafUpdate = 0;
 
     document.body.style.cursor = mode === 'move' ? 'grabbing' : 'ew-resize';
     document.body.style.userSelect = 'none';
     setDrag({ id: row.task.id, start: session.origin.start, due: session.origin.due });
 
-    const apply = (clientX: number) => {
+    const commitPreview = (clientX: number) => {
       const dx = timelineX(clientX) - startX;
       if (Math.abs(dx) > 3) session.moved = true;
       const cols = Math.round(dx / session.colWidth);
@@ -708,15 +867,33 @@ export function Board() {
       setDrag({ id: row.task.id, start: next.start, due: next.due });
     };
 
-    // 指针贴近左右边缘时持续滚动；越靠边越快
+    // pointermove 可能比帧还密：每帧最多提交一次预览，保持跟手但不做无谓渲染
+    const apply = (clientX: number) => {
+      pendingClientX = clientX;
+      if (rafUpdate !== 0) return;
+      rafUpdate = requestAnimationFrame(() => {
+        rafUpdate = 0;
+        commitPreview(pendingClientX);
+      });
+    };
+
+    const flushPending = () => {
+      if (rafUpdate !== 0) {
+        cancelAnimationFrame(rafUpdate);
+        rafUpdate = 0;
+      }
+      commitPreview(pendingClientX);
+    };
+
+    // 指针贴近左右边缘时持续滚动；越靠边越快。
+    // 视口 rect 在拖拽期间不变，缓存起来，避免每帧 getBoundingClientRect 触发布局。
     const EDGE = 64;
     const tick = () => {
-      const r = el.getBoundingClientRect();
       let step = 0;
-      if (lastClientX > r.right - EDGE) {
-        step = 4 + Math.min(1, (lastClientX - (r.right - EDGE)) / EDGE) * 16;
-      } else if (lastClientX < r.left + LEFT_WIDTH + EDGE) {
-        step = -(4 + Math.min(1, (r.left + LEFT_WIDTH + EDGE - lastClientX) / EDGE) * 16);
+      if (lastClientX > rect.right - EDGE) {
+        step = 4 + Math.min(1, (lastClientX - (rect.right - EDGE)) / EDGE) * 16;
+      } else if (lastClientX < rect.left + LEFT_WIDTH + EDGE) {
+        step = -(4 + Math.min(1, (rect.left + LEFT_WIDTH + EDGE - lastClientX) / EDGE) * 16);
       }
       if (step !== 0) {
         const before = el.scrollLeft;
@@ -730,6 +907,8 @@ export function Board() {
 
     const cleanup = () => {
       cancelAnimationFrame(raf);
+      cancelAnimationFrame(rafUpdate);
+      rafUpdate = 0;
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('keydown', onKey);
@@ -744,7 +923,9 @@ export function Board() {
       apply(ev.clientX);
     }
 
-    function onUp() {
+    function onUp(ev: PointerEvent) {
+      pendingClientX = ev.clientX;
+      flushPending();
       const cols = session.cols;
       const moved = session.moved;
       cleanup();
@@ -778,6 +959,7 @@ export function Board() {
     window.addEventListener('pointerup', onUp);
     window.addEventListener('keydown', onKey);
   };
+  startDragRef.current = startDrag;
 
   const fillerH = Math.max(0, viewportH - HEADER_HEIGHT - bodyHeight);
   const rowLines =
@@ -788,7 +970,7 @@ export function Board() {
       : undefined;
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col">
+    <div className={clsx('flex min-w-0 flex-1 flex-col', drag && 'is-dragging')}>
       {topBar}
       <div ref={scroller} className="thin-scroll relative flex-1 overflow-auto bg-canvas">
         <div
@@ -912,13 +1094,43 @@ export function Board() {
             />
           )}
 
+          {/* ---------- 时间轴网格：所有行共用一层 ---------- */}
+          <div
+            className="pointer-events-none absolute z-0"
+            style={{
+              left: LEFT_WIDTH,
+              top: HEADER_HEIGHT,
+              width: timelineWidth,
+              height: bodyHeight,
+              backgroundImage:
+                zoom === 'day'
+                  ? `repeating-linear-gradient(to right, rgba(120,113,108,0.085) 0 1px, transparent 1px ${colWidth}px)`
+                  : undefined,
+            }}
+          >
+            {months.slice(1).map((m) => (
+              <div
+                key={`grid-${m.key}`}
+                className="absolute top-0 bottom-0 w-px bg-stone-200"
+                style={{ left: m.startIndex * colWidth }}
+              />
+            ))}
+            {overtimeCols.map((c) => (
+              <div
+                key={`grid-ot-${c.date}`}
+                className="absolute top-0 bottom-0 bg-amber-500/[0.06]"
+                style={{ left: c.index * colWidth, width: colWidth }}
+              />
+            ))}
+          </div>
+
           {/* ---------- 行 ---------- */}
           {renderRows.map((rr) => {
             if (rr.kind === 'person') {
               return (
                 <div
                   key={rr.key}
-                  className="flex border-b border-line bg-stone-100/40"
+                  className="gantt-row flex border-b border-line bg-stone-100/40"
                   style={{ height: ROW_HEIGHT }}
                 >
                   <div
@@ -952,21 +1164,8 @@ export function Board() {
                   </div>
                   <div
                     className="relative shrink-0 bg-stone-100/40"
-                    style={{
-                      width: timelineWidth,
-                      backgroundImage:
-                        zoom === 'day'
-                          ? `repeating-linear-gradient(to right, rgba(120,113,108,0.06) 0 1px, transparent 1px ${colWidth}px)`
-                          : undefined,
-                    }}
+                    style={{ width: timelineWidth }}
                   >
-                    {months.slice(1).map((m) => (
-                      <div
-                        key={`ph-${m.key}`}
-                        className="pointer-events-none absolute top-0 bottom-0 w-px bg-stone-200/80"
-                        style={{ left: m.startIndex * colWidth }}
-                      />
-                    ))}
                   </div>
                 </div>
               );
@@ -974,76 +1173,31 @@ export function Board() {
 
             const row = rr.row;
             const selected = selectedId === row.task.id;
-            const isModule = !rr.compact && rr.indent === 0;
             const faded =
               Boolean(standupMode && standup && !standup.focusIds.has(row.task.id)) && !selected;
+            const dragPrimary = drag?.id === row.task.id ? drag : null;
+            const ghostTarget = ghostShift?.get(row.task.id) ?? null;
             return (
-              <div
+              <BoardTaskRow
                 key={rr.key}
-                className={clsx(
-                  'group flex border-b border-line-soft/80 transition-opacity',
-                  isModule && 'border-t border-line',
-                  faded && 'opacity-30',
-                )}
-                style={{ height: ROW_HEIGHT }}
-              >
-                <TaskCell
-                  row={row}
-                  selected={selected}
-                  canEdit={canEdit}
-                  onSelect={() => select(row.task.id)}
-                  onToggle={() => toggle(row.task.id)}
-                  onAddChild={() => void addTask(row.task.id)}
-                  expanded={!collapsed.has(row.task.id)}
-                  indent={rr.indent}
-                  compact={rr.compact}
-                  showOwner={rr.showOwner}
-                />
-
-                <div
-                  className={clsx(
-                    'relative shrink-0 transition-colors',
-                    selected ? 'bg-teal-500/[0.05]' : 'group-hover:bg-stone-900/[0.022]',
-                    isModule && !selected && 'bg-stone-900/[0.015]',
-                  )}
-                  style={{
-                    width: timelineWidth,
-                    backgroundImage:
-                      zoom === 'day'
-                        ? `repeating-linear-gradient(to right, rgba(120,113,108,0.085) 0 1px, transparent 1px ${colWidth}px)`
-                        : undefined,
-                  }}
-                >
-                  {months.slice(1).map((m) => (
-                    <div
-                      key={m.key}
-                      className="pointer-events-none absolute top-0 bottom-0 w-px bg-stone-200"
-                      style={{ left: m.startIndex * colWidth }}
-                    />
-                  ))}
-                  {overtimeCols.map((c) => (
-                    <div
-                      key={`row-ot-${c.date}`}
-                      className="pointer-events-none absolute top-0 bottom-0 bg-amber-500/[0.06]"
-                      style={{ left: c.index * colWidth, width: colWidth }}
-                    />
-                  ))}
-                  <Bar
-                    row={row}
-                    board={board}
-                    colWidth={colWidth}
-                    selected={selected}
-                    canEdit={canEdit}
-                    onSelect={() => select(row.task.id)}
-                    onToggleDone={() =>
-                      void patchTask(row.task.id, { done: row.status !== 'done' })
-                    }
-                    onDragStart={(mode, e) => startDrag(row, mode, e)}
-                    preview={drag?.id === row.task.id ? { start: drag.start, due: drag.due } : null}
-                    dragging={drag?.id === row.task.id}
-                  />
-                </div>
-              </div>
+                rr={rr}
+                board={board}
+                colWidth={colWidth}
+                timelineWidth={timelineWidth}
+                selected={selected}
+                canEdit={canEdit}
+                faded={faded}
+                expanded={!collapsed.has(row.task.id)}
+                previewStart={dragPrimary?.start ?? ghostTarget?.startDate ?? null}
+                previewDue={dragPrimary?.due ?? ghostTarget?.dueDate ?? null}
+                dragging={Boolean(dragPrimary)}
+                ghost={Boolean(ghostTarget)}
+                onSelect={handleSelect}
+                onToggle={handleToggle}
+                onAddChild={handleAddChild}
+                onToggleDone={handleToggleDone}
+                onDragStart={handleDragStart}
+              />
             );
           })}
           {fillerH > 0 && (
@@ -1098,6 +1252,7 @@ export function Board() {
               company: board.company.overrides,
             })}{' '}
             个工作日
+            {ghostShift && ghostShift.size > 0 ? ` · 联动 ${ghostShift.size} 个后续任务` : ''}
           </span>
         ) : (
           <span>今天 {formatCN(detail.today)}</span>

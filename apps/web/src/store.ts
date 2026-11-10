@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { projectOverdueWorkdays, type Task } from '@mplan/core';
 import {
   api,
   setForbiddenHandler,
@@ -7,7 +8,7 @@ import {
   type Bootstrap,
   type ProjectDetail,
 } from './api';
-import type { Zoom } from './lib/gantt';
+import { companyFromBootstrap, type Zoom } from './lib/gantt';
 
 export type ModalKind = 'people' | 'calendar' | 'newProject' | 'import' | 'changes' | 'login' | 'users' | 'projectSettings' | null;
 
@@ -34,8 +35,8 @@ export interface TaskSnapshot {
 }
 
 interface HistoryEntry {
-  before: TaskSnapshot;
-  after: TaskSnapshot;
+  before: TaskSnapshot[];
+  after: TaskSnapshot[];
 }
 
 interface AppState {
@@ -61,8 +62,10 @@ interface AppState {
   standupMode: boolean;
   modal: ModalKind;
   filter: FilterState;
-  toast: { kind: 'error' | 'ok'; text: string } | null;
+  toast: { kind: 'error' | 'ok' | 'warn'; text: string } | null;
   todayPing: number;
+  /** 改期时是否自动顺延后续任务；持久化在 localStorage */
+  autoShift: boolean;
   history: HistoryEntry[];
   future: HistoryEntry[];
   init: () => Promise<void>;
@@ -81,7 +84,10 @@ interface AppState {
   setModal: (m: ModalKind) => void;
   setFilter: (patch: Partial<FilterState>) => void;
   clearFilter: () => void;
-  notify: (text: string, kind?: 'error' | 'ok') => void;
+  setAutoShift: (on: boolean) => void;
+  /** 重新初始化项目后清空撤销栈：旧任务 ID 已不存在 */
+  clearHistory: () => void;
+  notify: (text: string, kind?: 'error' | 'ok' | 'warn') => void;
   pingToday: () => void;
   patchTask: (id: string, patch: Parameters<typeof api.patchTask>[1]) => Promise<void>;
   commitDates: (
@@ -89,6 +95,8 @@ interface AppState {
     next: { startDate: string; dueDate: string; estimateHours: number },
     recalc: 'none' | 'due',
   ) => Promise<void>;
+  /** 统一处理所有改日期 / 改工时的入口：写快照、联动、toast */
+  commitTaskPatch: (id: string, patch: Parameters<typeof api.patchTask>[1]) => Promise<void>;
   undo: () => Promise<void>;
   redo: () => Promise<void>;
   postponeTask: (id: string) => Promise<{ deltaWorkdays: number; shifted: number } | null>;
@@ -124,6 +132,58 @@ function requireEdit(get: () => AppState): boolean {
   return false;
 }
 
+const AUTO_SHIFT_KEY = 'mplan.autoShift';
+
+function loadAutoShift(): boolean {
+  try {
+    const raw = localStorage.getItem(AUTO_SHIFT_KEY);
+    return raw == null ? true : raw === '1';
+  } catch {
+    return true;
+  }
+}
+
+function snapshotOf(task: Task): TaskSnapshot {
+  return {
+    taskId: task.id,
+    startDate: task.startDate,
+    dueDate: task.dueDate,
+    estimateHours: task.estimateHours,
+  };
+}
+
+/** 对比刷新前后的项目任务，把主任务和所有被联动任务的日期变化合成一条撤销记录 */
+function diffTaskDates(
+  before: Task[],
+  after: Task[],
+  onlyIds: ReadonlySet<string>,
+): HistoryEntry | null {
+  const beforeMap = new Map(before.map((t) => [t.id, t]));
+  const parentIds = new Set<string>();
+  for (const t of [...before, ...after]) if (t.parentId) parentIds.add(t.parentId);
+  const beforeSnapshots: TaskSnapshot[] = [];
+  const afterSnapshots: TaskSnapshot[] = [];
+  for (const t of after) {
+    if (!onlyIds.has(t.id) || parentIds.has(t.id)) continue;
+    const prev = beforeMap.get(t.id);
+    if (!prev) continue;
+    if (
+      prev.startDate !== t.startDate ||
+      prev.dueDate !== t.dueDate ||
+      prev.estimateHours !== t.estimateHours
+    ) {
+      beforeSnapshots.push(snapshotOf(prev));
+      afterSnapshots.push(snapshotOf(t));
+    }
+  }
+  return beforeSnapshots.length ? { before: beforeSnapshots, after: afterSnapshots } : null;
+}
+
+function overdueOf(tasks: Task[], projectDue: string | null, boot: Bootstrap | null): number {
+  if (!boot) return 0;
+  return projectOverdueWorkdays(tasks, projectDue, companyFromBootstrap(boot));
+}
+
 export const useApp = create<AppState>((set, get) => ({
   boot: null,
   detail: null,
@@ -144,6 +204,7 @@ export const useApp = create<AppState>((set, get) => ({
   filter: EMPTY_FILTER,
   toast: null,
   todayPing: 0,
+  autoShift: loadAutoShift(),
   history: [],
   future: [],
 
@@ -214,6 +275,7 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   openProject: async (id) => {
+    const switching = get().detail?.project.id !== id;
     set({ loading: true });
     try {
       const detail = await api.project(id);
@@ -224,6 +286,8 @@ export const useApp = create<AppState>((set, get) => ({
         canEdit: canEditProject(get().user, detail.project.id),
         canAdminCurrent: canAdminProject(get().user, detail.project.id),
       });
+      // 撤销记录不跨项目：切项目后旧快照不能再用当前项目 id 回放
+      if (switching) set({ history: [], future: [] });
     } catch (e) {
       set({ loading: false });
       get().notify((e as Error).message);
@@ -256,7 +320,8 @@ export const useApp = create<AppState>((set, get) => ({
         canEditGlobal: authUser?.role === 'admin',
         needsSetup: boot.auth.needsSetup,
       });
-      const id = get().detail?.project.id ?? boot.projects[0]?.id;
+      const previousId = get().detail?.project.id;
+      const id = previousId ?? boot.projects[0]?.id;
       if (id) {
         const detail = await api.project(id);
         set({
@@ -264,6 +329,7 @@ export const useApp = create<AppState>((set, get) => ({
           canEdit: canEditProject(authUser, detail.project.id),
           canAdminCurrent: canAdminProject(authUser, detail.project.id),
         });
+        if (previousId !== detail.project.id) set({ history: [], future: [] });
       } else {
         set({ canEdit: false, canAdminCurrent: false });
       }
@@ -289,6 +355,15 @@ export const useApp = create<AppState>((set, get) => ({
   setModal: (modal) => set({ modal }),
   setFilter: (patch) => set((s) => ({ filter: { ...s.filter, ...patch } })),
   clearFilter: () => set({ filter: EMPTY_FILTER }),
+  setAutoShift: (autoShift) => {
+    try {
+      localStorage.setItem(AUTO_SHIFT_KEY, autoShift ? '1' : '0');
+    } catch {
+      /* localStorage 不可用时只影响持久化 */
+    }
+    set({ autoShift });
+  },
+  clearHistory: () => set({ history: [], future: [] }),
   pingToday: () => set((s) => ({ todayPing: s.todayPing + 1 })),
 
   notify: (text, kind = 'error') => {
@@ -308,40 +383,54 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   commitDates: async (id, next, recalc) => {
+    await get().commitTaskPatch(id, {
+      startDate: next.startDate,
+      dueDate: next.dueDate,
+      estimateHours: next.estimateHours,
+      recalc,
+    });
+  },
+
+  commitTaskPatch: async (id, patch) => {
     if (!requireEdit(get)) return;
-    const before = get().detail?.tasks.find((t) => t.id === id);
-    if (!before) return;
-    const snapshot: TaskSnapshot = {
-      taskId: id,
-      startDate: before.startDate,
-      dueDate: before.dueDate,
-      estimateHours: before.estimateHours,
-    };
+    const beforeDetail = get().detail;
+    if (!beforeDetail) return;
+    const beforeTasks = beforeDetail.tasks;
+    const beforeOverdue = overdueOf(beforeTasks, beforeDetail.project.dueDate, get().boot);
     try {
-      await api.patchTask(id, {
-        startDate: next.startDate,
-        dueDate: next.dueDate,
-        estimateHours: next.estimateHours,
-        recalc,
+      const res = await api.patchTask(id, {
+        ...patch,
+        shiftFollowing: get().autoShift,
       });
       await get().refreshProject();
-      const after = get().detail?.tasks.find((t) => t.id === id);
-      if (!after) return;
-      set((s) => ({
-        history: [
-          ...s.history,
-          {
-            before: snapshot,
-            after: {
-              taskId: id,
-              startDate: after.startDate,
-              dueDate: after.dueDate,
-              estimateHours: after.estimateHours,
-            },
-          },
-        ].slice(-50),
-        future: [],
-      }));
+      const afterDetail = get().detail;
+      if (!afterDetail) return;
+
+      // 用刷新前后的快照对比，而不是只信主任务：被联动的任务也要进同一条撤销记录
+      const diff = diffTaskDates(
+        beforeTasks,
+        afterDetail.tasks,
+        new Set([id, ...res.shiftedTaskIds]),
+      );
+      if (diff) {
+        set((s) => ({
+          history: [...s.history, diff].slice(-50),
+          future: [],
+        }));
+      }
+
+      const afterOverdue = overdueOf(afterDetail.tasks, afterDetail.project.dueDate, get().boot);
+      const worsened = afterOverdue > beforeOverdue;
+      if (res.autoShift && res.autoShift.count > 0) {
+        get().notify(
+          worsened
+            ? `已联动 ${res.autoShift.count} 个后续任务（+${res.autoShift.deltaWorkdays} 个工作日）；项目计划已超期 ${afterOverdue} 个工作日`
+            : `已联动 ${res.autoShift.count} 个后续任务（+${res.autoShift.deltaWorkdays} 个工作日）`,
+          worsened ? 'warn' : 'ok',
+        );
+      } else if (worsened) {
+        get().notify(`项目计划完成日已超期 ${afterOverdue} 个工作日，请手动调整`, 'warn');
+      }
     } catch (e) {
       get().notify((e as Error).message);
     }
@@ -350,9 +439,18 @@ export const useApp = create<AppState>((set, get) => ({
   undo: async () => {
     if (!requireEdit(get)) return;
     const entry = get().history.at(-1);
-    if (!entry) return;
+    const projectId = get().detail?.project.id;
+    if (!entry || !projectId) return;
     try {
-      await api.patchTask(entry.before.taskId, { ...entry.before, recalc: 'none' });
+      await api.restoreTaskDates(
+        projectId,
+        entry.before.map((snapshot) => ({
+          id: snapshot.taskId,
+          startDate: snapshot.startDate,
+          dueDate: snapshot.dueDate,
+          estimateHours: snapshot.estimateHours,
+        })),
+      );
       await get().refreshProject();
       set((s) => ({ history: s.history.slice(0, -1), future: [...s.future, entry] }));
       get().notify('已撤销', 'ok');
@@ -363,9 +461,25 @@ export const useApp = create<AppState>((set, get) => ({
 
   postponeTask: async (id) => {
     if (!requireEdit(get)) return null;
+    const beforeDetail = get().detail;
+    if (!beforeDetail) return null;
     try {
       const res = await api.postpone(id);
       await get().refreshProject();
+      const afterDetail = get().detail;
+      if (afterDetail) {
+        const diff = diffTaskDates(
+          beforeDetail.tasks,
+          afterDetail.tasks,
+          new Set(beforeDetail.tasks.map((t) => t.id)),
+        );
+        if (diff) {
+          set((s) => ({
+            history: [...s.history, diff].slice(-50),
+            future: [],
+          }));
+        }
+      }
       get().notify(`已顺延 ${res.shifted} 个任务（+${res.deltaWorkdays} 个工作日）`, 'ok');
       return { deltaWorkdays: res.deltaWorkdays, shifted: res.shifted };
     } catch (e) {
@@ -377,9 +491,18 @@ export const useApp = create<AppState>((set, get) => ({
   redo: async () => {
     if (!requireEdit(get)) return;
     const entry = get().future.at(-1);
-    if (!entry) return;
+    const projectId = get().detail?.project.id;
+    if (!entry || !projectId) return;
     try {
-      await api.patchTask(entry.after.taskId, { ...entry.after, recalc: 'none' });
+      await api.restoreTaskDates(
+        projectId,
+        entry.after.map((snapshot) => ({
+          id: snapshot.taskId,
+          startDate: snapshot.startDate,
+          dueDate: snapshot.dueDate,
+          estimateHours: snapshot.estimateHours,
+        })),
+      );
       await get().refreshProject();
       set((s) => ({ future: s.future.slice(0, -1), history: [...s.history, entry] }));
       get().notify('已重做', 'ok');

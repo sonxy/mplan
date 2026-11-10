@@ -107,3 +107,20 @@
 .animate-slide-in {
   animation: slide-in 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
+
+/*
+ * 拖拽期间只保留被拖任务条的阴影，关掉其他行/条的过渡。
+ * Safari 对大量 box-shadow / transition 的重绘更敏感，这一层能明显降低拖拽时的绘制压力。
+ */
+.is-dragging .gantt-row {
+  transition: none !important;
+}
+
+.is-dragging .gantt-bar:not([data-dragging='1']):not([data-selected='1']) {
+  box-shadow: none !important;
+  transition: none !important;
+}
+
+.is-dragging .gantt-bar:not([data-dragging='1']):not([data-selected='1']):hover {
+  box-shadow: none !important;
+}

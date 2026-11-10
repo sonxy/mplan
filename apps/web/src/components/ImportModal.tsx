@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { Download, FileSpreadsheet, Upload, X } from 'lucide-react';
-import { parseProjectCsv } from '@mplan/core';
+import { AlertTriangle, Download, FileSpreadsheet, RefreshCcw, Upload, X } from 'lucide-react';
+import { buildProjectCsv, csvFileName, parseProjectCsv } from '@mplan/core';
 import { useApp } from '../store';
 import { api, type ImportRowInput } from '../api';
 import { downloadTextFile } from '../lib/download';
@@ -33,20 +33,37 @@ function downloadTemplate() {
 }
 
 export function ImportModal() {
-  const { boot, detail, modal, setModal, refreshAll, openProject, notify, canEdit, canEditGlobal } =
-    useApp();
+  const {
+    boot,
+    detail,
+    modal,
+    setModal,
+    refreshAll,
+    openProject,
+    notify,
+    canEdit,
+    canEditGlobal,
+    canAdminCurrent,
+    select,
+    clearHistory,
+  } = useApp();
   const open = modal === 'import';
 
-  const [mode, setMode] = useState<'current' | 'new'>('current');
+  const [mode, setMode] = useState<'current' | 'new' | 'reset'>('current');
   const [newName, setNewName] = useState('');
   const [autoCreate, setAutoCreate] = useState(true);
+  const [updateProjectDue, setUpdateProjectDue] = useState(true);
+  const [resetConfirmed, setResetConfirmed] = useState(false);
   const [raw, setRaw] = useState('');
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (open && !canEditGlobal) setMode('current');
-  }, [open, canEditGlobal]);
+    if (!open) return;
+    if (!canEditGlobal && mode === 'new') setMode('current');
+    if (!canAdminCurrent && mode === 'reset') setMode('current');
+    setResetConfirmed(false);
+  }, [open, canEditGlobal, canAdminCurrent, mode]);
 
   const personNames = useMemo(
     () => new Set((boot?.persons ?? []).map((p) => p.name)),
@@ -79,11 +96,22 @@ export function ImportModal() {
     !parsed.fatal &&
     (mode === 'current'
       ? Boolean(detail) && canEdit
-      : canEditGlobal && newName.trim().length > 0);
+      : mode === 'new'
+        ? canEditGlobal && newName.trim().length > 0
+        : Boolean(detail) && canAdminCurrent && resetConfirmed);
 
   const onFile = async (file: File | undefined) => {
     if (!file) return;
     setRaw(await file.text());
+  };
+
+  const downloadBackup = () => {
+    if (!detail) return;
+    downloadTextFile(
+      csvFileName(detail.project.code, detail.project.name),
+      buildProjectCsv(detail.tasks, boot?.persons ?? []),
+    );
+    notify('已导出当前项目备份', 'ok');
   };
 
   const submit = async () => {
@@ -96,11 +124,39 @@ export function ImportModal() {
         name: r.name,
         owner: r.owner,
         hours: r.hours,
+        hoursProvided: r.hoursProvided,
         start: r.start ?? undefined,
         due: r.due ?? undefined,
         done: r.done,
         note: r.note,
       }));
+
+      if (mode === 'reset') {
+        if (!detail) return;
+        const res = await api.reinitializeProject(detail.project.id, {
+          autoCreatePersons: autoCreate,
+          updateProjectDue,
+          rows,
+        });
+        await refreshAll();
+        select(null);
+        clearHistory();
+        setModal(null);
+        setRaw('');
+        setResetConfirmed(false);
+        notify(
+          `项目已重新初始化：删除 ${res.deleted} 个任务，导入 ${res.created} 行${
+            res.personsCreated ? `，新建 ${res.personsCreated} 位成员` : ''
+          }${res.projectDueDate ? `；计划完成日 ${res.projectDueDate}` : ''}${
+            res.warnings.length
+              ? `；${res.warnings.length} 行日期与工时不一致，已按工时`
+              : ''
+          }`,
+          res.warnings.length ? 'warn' : 'ok',
+        );
+        return;
+      }
+
       const res = await api.importCsv({
         ...(mode === 'current'
           ? { projectId: detail?.project.id }
@@ -113,8 +169,12 @@ export function ImportModal() {
       setModal(null);
       setRaw('');
       notify(
-        `已导入 ${res.created} 行${res.personsCreated ? `，新建 ${res.personsCreated} 位成员` : ''}`,
-        'ok',
+        `已导入 ${res.created} 行${res.personsCreated ? `，新建 ${res.personsCreated} 位成员` : ''}${
+          res.warnings.length
+            ? `；${res.warnings.length} 行日期与工时不一致，已按工时`
+            : ''
+        }`,
+        res.warnings.length ? 'warn' : 'ok',
       );
     } catch (e) {
       notify((e as Error).message);
@@ -129,8 +189,12 @@ export function ImportModal() {
     <Modal
       open={open}
       onClose={() => setModal(null)}
-      title="导入项目模板"
-      subtitle="编号 1 / 1.2 / 1.2.3 表达层级：点的个数就是层级，父编号就是去掉最后一段"
+      title={mode === 'reset' ? '重新初始化项目' : '导入项目模板'}
+      subtitle={
+        mode === 'reset'
+          ? '删除当前项目全部任务并按 CSV 重建；项目信息、成员和权限保留。建议先下载备份。'
+          : '编号 1 / 1.2 / 1.2.3 表达层级：点的个数就是层级，父编号就是去掉最后一段'
+      }
       width={760}
       footer={
         <>
@@ -138,18 +202,23 @@ export function ImportModal() {
             {parsed.fatal
               ? parsed.fatal
               : parsed.rows.length > 0
-                ? `解析出 ${parsed.rows.length} 行${parsed.issues.length ? `，其中 ${parsed.issues.length} 处有问题` : ''}`
+                ? mode === 'reset'
+                  ? `将删除 ${detail?.tasks.length ?? 0} 个任务，导入 ${parsed.rows.length} 行${
+                      parsed.issues.length ? `；${parsed.issues.length} 处有问题` : ''
+                    }`
+                  : `解析出 ${parsed.rows.length} 行${parsed.issues.length ? `，其中 ${parsed.issues.length} 处有问题` : ''}`
                 : '还没有读取到内容'}
           </span>
           <Button variant="outline" onClick={() => setModal(null)}>
             取消
           </Button>
           <Button
-            variant="primary"
+            variant={mode === 'reset' ? 'danger' : 'primary'}
             onClick={() => void submit()}
             disabled={!canEdit || !canImport || busy}
           >
-            <Upload size={13} /> 导入
+            {mode === 'reset' ? <RefreshCcw size={13} /> : <Upload size={13} />}
+            {mode === 'reset' ? '重新初始化' : '导入'}
           </Button>
         </>
       }
@@ -205,13 +274,39 @@ export function ImportModal() {
                   新建项目
                 </label>
               )}
+              {canAdminCurrent && (
+                <label className="flex items-center gap-1.5 text-rose-700">
+                  <input
+                    type="radio"
+                    checked={mode === 'reset'}
+                    onChange={() => {
+                      setMode('reset');
+                      setResetConfirmed(false);
+                    }}
+                    disabled={!detail}
+                  />
+                  重新初始化
+                </label>
+              )}
             </div>
+            {mode !== 'new' && detail && (
+              <p className="mt-1 flex min-w-0 items-center gap-1 text-[10.5px] text-ink-3">
+                <span className="shrink-0">当前项目</span>
+                <span
+                  className="max-w-[180px] truncate font-medium text-ink-2"
+                  title={`${detail.project.name}（${detail.project.code}）`}
+                >
+                  {detail.project.name}
+                </span>
+                <span className="num shrink-0">（{detail.project.code}）</span>
+              </p>
+            )}
           </div>
         </div>
 
         {!canEditGlobal && (
           <p className="text-[11px] text-ink-3">
-            导入只作用于你有编辑权限的项目；新建项目仅管理员可用。
+            导入只作用于你有编辑权限的项目；新建项目仅全局管理员可用，重新初始化需要项目管理员。
           </p>
         )}
 
@@ -224,6 +319,45 @@ export function ImportModal() {
               placeholder="例如：官网 4.0 改版"
             />
           </Field>
+        )}
+
+        {mode === 'reset' && (
+          <div className="space-y-2 rounded-lg border border-rose-200 bg-rose-50/70 p-3 text-[11.5px] text-rose-800">
+            <div className="flex items-start gap-2">
+              <AlertTriangle size={14} className="mt-px shrink-0 text-rose-600" />
+              <div>
+                <div className="font-medium">重新初始化会删除当前项目全部任务</div>
+                <p className="mt-0.5 leading-relaxed text-rose-700/90">
+                  将删除「{detail?.project.name ?? '当前项目'}」的 {detail?.tasks.length ?? 0}{' '}
+                  个任务及其任务级加班/请假，清空项目旧变更日志（保留本次重置记录）；项目信息、成员和权限保留。任务
+                  ID 会重新生成，撤销历史会被清空。
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pl-6">
+              <label className="flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={resetConfirmed}
+                  onChange={(e) => setResetConfirmed(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-rose-600"
+                />
+                我知道会删除全部任务
+              </label>
+              <label className="flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={updateProjectDue}
+                  onChange={(e) => setUpdateProjectDue(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-teal-600"
+                />
+                按导入任务更新项目计划完成日
+              </label>
+              <Button size="sm" variant="outline" onClick={downloadBackup} disabled={!detail}>
+                <Download size={12} /> 下载当前备份
+              </Button>
+            </div>
+          </div>
         )}
 
         <textarea

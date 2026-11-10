@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   type DayOverrideMap,
+  type Task,
   CSV_HEADERS,
   buildProjectCsv,
+  computeAutoShift,
   parseCsv,
   parseProjectCsv,
+  projectOverdueWorkdays,
   addWorkdays,
   buildAxis,
   buildCompanyCalendar,
@@ -231,6 +234,22 @@ describe('CSV 导入导出（编号制）', () => {
     expect(rows[3][1]).toBe('里程碑');
   });
 
+  it('区分工时留空和显式填写（0 也算显式）', () => {
+    const text = [
+      '编号,类型,名称,负责人,工时,开始日期',
+      '1,任务,模块,,1,2026-11-10',
+      '1.1,任务,子任务甲,,,2026-11-10',
+      '1.2,任务,子任务乙,,0,2026-11-10',
+    ].join('\n');
+    const { rows, issues } = parseProjectCsv(text);
+    expect(issues).toEqual([]);
+    expect(rows.map((r) => [r.hours, r.hoursProvided])).toEqual([
+      [1, true],
+      [0, false],
+      [0, true],
+    ]);
+  });
+
   it('逗号、引号会被正确转义并能解析回来', () => {
     const csv = buildProjectCsv(tasks, persons);
     expect(csv).toContain('"首页, 改版"');
@@ -316,5 +335,209 @@ describe('CSV 导入导出（编号制）', () => {
     expect(dup?.line).toBe(5);
     expect(dup?.message).toContain('与第 2 行重复');
     expect(badDate?.line).toBe(7);
+  });
+});
+
+describe('改期联动（自动顺延后续）', () => {
+  const makeTask = (id: string, over: Partial<Task> = {}): Task => ({
+    id,
+    projectId: 'p1',
+    parentId: null,
+    depth: 1,
+    sort: 0,
+    name: id,
+    ownerId: 'u1',
+    estimateHours: 8,
+    kind: 'task',
+    startDate: '2026-11-02',
+    dueDate: '2026-11-06',
+    progressMode: 'auto',
+    manualProgress: null,
+    doneAt: null,
+    note: null,
+    ...over,
+  });
+
+  const shift = (tasks: Task[], over: Partial<Parameters<typeof computeAutoShift>[0]> = {}) =>
+    computeAutoShift({
+      tasks,
+      taskId: 'A',
+      oldDueDate: '2026-11-06',
+      newDueDate: '2026-11-10',
+      company,
+      ...over,
+    });
+
+  it('同负责人 / 同父级分支的后续任务平移，并行和无关任务不动', () => {
+    const tasks = [
+      makeTask('P', { dueDate: '2026-11-20' }),
+      makeTask('Q', { dueDate: '2026-11-20' }),
+      makeTask('A', { parentId: 'P', depth: 2 }),
+      makeTask('B', {
+        parentId: 'P',
+        depth: 2,
+        ownerId: 'u1',
+        startDate: '2026-11-09',
+        dueDate: '2026-11-10',
+      }),
+      makeTask('C', {
+        parentId: 'Q',
+        depth: 2,
+        ownerId: 'u2',
+        startDate: '2026-11-09',
+        dueDate: '2026-11-10',
+      }),
+      makeTask('D', {
+        parentId: 'P',
+        depth: 2,
+        ownerId: 'u2',
+        startDate: '2026-11-09',
+        dueDate: '2026-11-10',
+      }),
+      makeTask('E', {
+        parentId: 'P',
+        depth: 2,
+        ownerId: 'u1',
+        startDate: '2026-11-06',
+        dueDate: '2026-11-06',
+      }),
+      makeTask('F', {
+        parentId: 'P',
+        depth: 2,
+        ownerId: 'u1',
+        startDate: '2026-11-09',
+        dueDate: '2026-11-10',
+        doneAt: '2026-11-10T00:00:00.000Z',
+      }),
+    ];
+    const res = shift(tasks);
+    expect(res.deltaWorkdays).toBe(2);
+    expect(res.targets.map((t) => t.taskId)).toEqual(['B', 'D']);
+    expect(res.targets[0]).toMatchObject({ startDate: '2026-11-11', dueDate: '2026-11-12' });
+  });
+
+  it('同父级分支包括兄弟汇总节点下面的叶子', () => {
+    const tasks = [
+      makeTask('P', { dueDate: '2026-11-20' }),
+      makeTask('A', { parentId: 'P', depth: 2 }),
+      makeTask('S', { parentId: 'P', depth: 2, dueDate: '2026-11-20' }),
+      makeTask('L', {
+        parentId: 'S',
+        depth: 3,
+        ownerId: 'u2',
+        startDate: '2026-11-09',
+        dueDate: '2026-11-10',
+      }),
+    ];
+    expect(shift(tasks).targets.map((t) => t.taskId)).toEqual(['L']);
+  });
+
+  it('结束日没往后移动就不联动', () => {
+    const tasks = [makeTask('A'), makeTask('B', { startDate: '2026-11-09' })];
+    expect(shift(tasks, { newDueDate: '2026-11-05' }).targets).toEqual([]);
+    expect(shift(tasks, { newDueDate: '2026-11-06' }).targets).toEqual([]);
+  });
+
+  it('负责人为空时只按父级分支匹配，不把所有未分配任务都推走', () => {
+    const tasks = [
+      makeTask('P', { dueDate: '2026-11-20' }),
+      makeTask('Q', { dueDate: '2026-11-20' }),
+      makeTask('A', { parentId: 'P', depth: 2, ownerId: null }),
+      makeTask('B', {
+        parentId: 'P',
+        depth: 2,
+        ownerId: 'u2',
+        startDate: '2026-11-09',
+        dueDate: '2026-11-10',
+      }),
+      makeTask('C', {
+        parentId: 'Q',
+        depth: 2,
+        ownerId: null,
+        startDate: '2026-11-09',
+        dueDate: '2026-11-10',
+      }),
+    ];
+    expect(shift(tasks).targets.map((t) => t.taskId)).toEqual(['B']);
+  });
+
+  it('父级为空时只按负责人匹配', () => {
+    const tasks = [
+      makeTask('A', { ownerId: 'u1' }),
+      makeTask('B', { ownerId: 'u1', startDate: '2026-11-09', dueDate: '2026-11-10' }),
+      makeTask('C', { ownerId: 'u2', startDate: '2026-11-09', dueDate: '2026-11-10' }),
+    ];
+    expect(shift(tasks).targets.map((t) => t.taskId)).toEqual(['B']);
+  });
+
+  it('平移时按负责人日历归一化，工期不变', () => {
+    const tasks = [makeTask('A'), makeTask('B', { startDate: '2026-11-09', dueDate: '2026-11-10' })];
+    const res = shift(tasks, {
+      personOverrides: { u1: { '2026-11-11': { work: false } } },
+    });
+    expect(res.targets[0]).toMatchObject({ startDate: '2026-11-12', dueDate: '2026-11-13' });
+  });
+
+  it('里程碑平移后仍为零工期', () => {
+    const tasks = [
+      makeTask('A'),
+      makeTask('M', {
+        kind: 'milestone',
+        startDate: '2026-11-09',
+        dueDate: '2026-11-09',
+        estimateHours: 0,
+      }),
+    ];
+    expect(shift(tasks).targets[0]).toMatchObject({
+      startDate: '2026-11-11',
+      dueDate: '2026-11-11',
+    });
+  });
+});
+
+describe('项目计划超期', () => {
+  const t = (id: string, over: Partial<Task> = {}): Task => ({
+    id,
+    projectId: 'p1',
+    parentId: null,
+    depth: 1,
+    sort: 0,
+    name: id,
+    ownerId: 'u1',
+    estimateHours: 8,
+    kind: 'task',
+    startDate: '2026-11-02',
+    dueDate: '2026-11-20',
+    progressMode: 'auto',
+    manualProgress: null,
+    doneAt: null,
+    note: null,
+    ...over,
+  });
+
+  it('按未完成叶子任务的最晚结束日算工作日', () => {
+    const tasks = [
+      t('P', { dueDate: '2026-11-30' }),
+      t('A', { parentId: 'P', depth: 2, dueDate: '2026-11-24' }),
+      t('B', {
+        parentId: 'P',
+        depth: 2,
+        dueDate: '2026-11-25',
+        doneAt: '2026-11-20T00:00:00.000Z',
+      }),
+    ];
+    expect(projectOverdueWorkdays(tasks, '2026-11-20', company)).toBe(2); // 11/23、11/24
+  });
+
+  it('没设项目完成日 / 全部完成时不算超期', () => {
+    const tasks = [t('A', { dueDate: '2026-11-24' })];
+    expect(projectOverdueWorkdays(tasks, null, company)).toBe(0);
+    expect(
+      projectOverdueWorkdays(
+        tasks.map((x) => ({ ...x, doneAt: '2026-11-20T00:00:00.000Z' })),
+        '2026-11-20',
+        company,
+      ),
+    ).toBe(0);
   });
 });

@@ -186,6 +186,8 @@ export interface ParsedProjectRow {
   name: string;
   owner: string | null;
   hours: number;
+  /** 工时单元格是否非空；用来决定「工时优先」还是「结束日优先」 */
+  hoursProvided: boolean;
   start: string | null;
   due: string | null;
   done: boolean;
@@ -265,6 +267,7 @@ export function parseProjectCsv(text: string): ProjectCsvResult {
     }
 
     const hoursText = get('工时');
+    const hoursProvided = hoursText !== '';
     const hours = hoursText === '' ? 0 : Number(hoursText);
     if (!Number.isFinite(hours) || hours < 0) {
       issues.push({ line, message: `工时「${hoursText}」不是有效数字` });
@@ -279,6 +282,7 @@ export function parseProjectCsv(text: string): ProjectCsvResult {
       name,
       owner: get('负责人') || null,
       hours,
+      hoursProvided,
       start,
       due,
       done: /已完成|完成/.test(get('状态')),

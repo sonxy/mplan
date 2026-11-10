@@ -5,6 +5,7 @@ import {
   Check,
   Circle,
   Clock,
+  Link2,
   Trash2,
   X,
   Zap,
@@ -32,12 +33,14 @@ export function TaskDrawer() {
     selectedId,
     select,
     patchTask,
+    commitTaskPatch,
     removeTask,
     refreshProject,
     notify,
     postponeTask,
     canEdit,
     user,
+    autoShift,
   } = useApp();
   const task = detail?.tasks.find((t) => t.id === selectedId) ?? null;
 
@@ -137,7 +140,7 @@ export function TaskDrawer() {
       setHours(String(Math.round(task.estimateHours)));
       return;
     }
-    if (v !== task.estimateHours) void patchTask(task.id, { estimateHours: v });
+    if (v !== task.estimateHours) void commitTaskPatch(task.id, { estimateHours: v });
   };
 
   const saveOvertime = async (dates: string[]) => {
@@ -293,7 +296,9 @@ export function TaskDrawer() {
                 className={clsx(inputClass, 'num')}
                 value={task.startDate}
                 disabled={isParent || !canEdit}
-                onChange={(e) => e.target.value && void patchTask(task.id, { startDate: e.target.value })}
+                onChange={(e) =>
+                  e.target.value && void commitTaskPatch(task.id, { startDate: e.target.value })
+                }
               />
             </Field>
             <Field label="结束时间" hint={isMilestone ? '同开始日' : `${workdays} 个工作日`}>
@@ -302,10 +307,21 @@ export function TaskDrawer() {
                 className={clsx(inputClass, 'num')}
                 value={task.dueDate}
                 disabled={isParent || isMilestone || !canEdit}
-                onChange={(e) => e.target.value && void patchTask(task.id, { dueDate: e.target.value })}
+                onChange={(e) =>
+                  e.target.value && void commitTaskPatch(task.id, { dueDate: e.target.value })
+                }
               />
             </Field>
           </div>
+
+          {canEdit && (
+            <p className="flex items-start gap-1 text-[10.5px] leading-relaxed text-ink-3">
+              <Link2 size={11} className="mt-0.5 shrink-0" />
+              {autoShift
+                ? '联动已开启：改期会自动顺延同一负责人 / 同一父级分支下开始日更晚的未完成任务。'
+                : '联动已关闭：改期只动当前任务，可在顶部「联动」按钮重新开启。'}
+            </p>
+          )}
 
           {!isParent && (
             <label

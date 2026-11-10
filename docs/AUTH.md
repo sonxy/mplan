@@ -96,8 +96,9 @@ if (!req.currentUser) throw httpError('请先登录再修改', 401);
 
 | 资源 | 判断 | 说明 |
 |---|---|---|
-| 任务的新建 / 修改 / 删除 / 顺延 / 加班日 | `requireProjectAccess(req, projectId)` | 全局管理员或该项目在 `projectIds` 里 |
+| 任务的新建 / 修改 / 删除 / 顺延 / 加班日 / 批量日期恢复 | `requireProjectAccess(req, projectId)` | 全局管理员或该项目在 `projectIds` 里 |
 | CSV 导入到已有项目 | `requireProjectAccess(req, projectId)` | 同上 |
+| 项目重新初始化（覆盖导入） | `requireProjectAdmin(req, projectId)` | 会删除当前项目任务和旧日志，只有项目管理员/全局管理员可用 |
 | CSV 导入并新建项目 | `requireAdmin(req)` | 建项目属于全局操作 |
 | 项目修改（名称 / 编号 / 日期 / 备注） | `requireProjectAdmin(req, projectId)` | 全局管理员或该项目的项目管理员 |
 | 项目归档 / 恢复 | `requireProjectAdmin(req, projectId)` | 全局管理员或该项目的项目管理员；归档后项目详情对其他人按 404 处理 |
@@ -138,6 +139,8 @@ if (!req.currentUser) throw httpError('请先登录再修改', 401);
 | PATCH | `/api/projects/:id` | 项目管理员 | 修改项目名称 / 编号 / 日期 / 备注 |
 | POST | `/api/projects/:id/archive` | 项目管理员 | 归档项目：从项目列表隐藏，数据保留 |
 | POST | `/api/projects/:id/unarchive` | 项目管理员 | 恢复归档项目 |
+| PUT | `/api/projects/:id/task-dates` | 项目编辑权限 | 批量恢复任务日期（撤销 / 重做），不触发联动 |
+| POST | `/api/projects/:id/reinitialize` | 项目管理员 | 删除当前项目任务和旧日志，按 CSV 重建（覆盖导入） |
 | DELETE | `/api/auth/users/:id` | 管理员 | 删除账号（不能删自己、不能删最后一个管理员） |
 
 `GET /api/bootstrap` 会额外返回：

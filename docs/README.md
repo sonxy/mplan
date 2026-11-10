@@ -28,8 +28,9 @@
 ## 项目状态
 
 - 版本：`0.1.0`，个人项目，已公开（未附许可证）
-- 功能：4 层任务树、甘特拖拽 / 撤销、公司日历、按项目授权、项目管理员、项目归档、CSV 导入导出、晨会聚焦
-- 测试：`packages/core` 31 个单测；本地/CI 均可跑 typecheck / test / build
+- 功能：4 层任务树、甘特拖拽 / 撤销、改期联动、公司日历、按项目授权、项目管理员、项目归档、CSV 导入导出、项目重新初始化、晨会聚焦
+- 性能：按 300 任务级优化（行级 memo、单层网格、拖拽 RAF 合并）；300 任务拖拽只有受影响行产生 DOM 变更
+- 测试：`packages/core` 41 个单测；本地/CI 均可跑 typecheck / test / build
 - 数据库：MySQL 8.4；开发环境用 Docker Compose，生产环境可参考 [DEPLOY.md](DEPLOY.md)
 - 当前没有 API / UI 自动化集成测试，欢迎补 Playwright / API 用例
 

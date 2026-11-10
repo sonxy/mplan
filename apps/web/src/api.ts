@@ -91,6 +91,8 @@ export interface ImportRowInput {
   name: string;
   owner?: string | null;
   hours?: number;
+  /** 工时单元格是否非空：非空时导入按工时优先，不用结束日反算 */
+  hoursProvided?: boolean;
   start?: string;
   due?: string;
   done?: boolean;
@@ -236,8 +238,25 @@ export const api = {
       done: boolean;
       note: string | null;
       recalc: 'none' | 'hours' | 'due';
+      /** 改期时联动顺延同一负责人 / 同父级分支的后续任务 */
+      shiftFollowing: boolean;
     }>,
-  ) => req<{ task: Task }>(`/api/tasks/${id}`, { method: 'PATCH', ...json(body) }),
+  ) =>
+    req<{
+      task: Task;
+      autoShift: { deltaWorkdays: number; count: number } | null;
+      /** 本次被联动平移的任务 id（不含主任务） */
+      shiftedTaskIds: string[];
+    }>(`/api/tasks/${id}`, { method: 'PATCH', ...json(body) }),
+
+  restoreTaskDates: (
+    projectId: string,
+    tasks: Array<{ id: string; startDate: string; dueDate: string; estimateHours: number }>,
+  ) =>
+    req<{ ok: true }>(`/api/projects/${projectId}/task-dates`, {
+      method: 'PUT',
+      ...json({ tasks }),
+    }),
 
   deleteTask: (id: string) => req<{ ok: true }>(`/api/tasks/${id}`, { method: 'DELETE' }),
 
@@ -276,7 +295,30 @@ export const api = {
     autoCreatePersons?: boolean;
     rows: ImportRowInput[];
   }) =>
-    req<{ projectId: string; created: number; personsCreated: number }>('/api/import', {
+    req<{ projectId: string; created: number; personsCreated: number; warnings: string[] }>(
+      '/api/import',
+      {
+        method: 'POST',
+        ...json(body),
+      },
+    ),
+
+  reinitializeProject: (
+    projectId: string,
+    body: {
+      autoCreatePersons?: boolean;
+      updateProjectDue?: boolean;
+      rows: ImportRowInput[];
+    },
+  ) =>
+    req<{
+      projectId: string;
+      created: number;
+      deleted: number;
+      personsCreated: number;
+      projectDueDate: string | null;
+      warnings: string[];
+    }>(`/api/projects/${projectId}/reinitialize`, {
       method: 'POST',
       ...json(body),
     }),

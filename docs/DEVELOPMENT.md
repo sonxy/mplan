@@ -15,9 +15,9 @@
 | 版本 / 状态 | `0.1.0` / 个人项目（已公开，未附许可证） |
 | 代码量 | 约 1 万行 TS/TSX（不含依赖） |
 | 技术栈 | React 19 + Vite 7 / Fastify 5 + Drizzle + MySQL 8.4 / Tailwind v4 / Zustand |
-| 接口 | 31 个 REST 端点；读接口公开，写接口需登录（8 个登录/账号接口 + 3 个项目成员接口 + 2 个项目归档接口） |
+| 接口 | 33 个 REST 端点；读接口公开，写接口需登录（8 个登录/账号接口 + 3 个项目成员接口 + 2 个项目归档接口 + 1 个批量日期接口 + 1 个项目重新初始化接口） |
 | 数据表 | 10 张（`users` / `sessions` / `project_members` + 业务 7 张） |
-| 测试 | 31 个单测（只覆盖 `packages/core`）+ CDP 截图脚本 + 可选 CI 配置 |
+| 测试 | 41 个单测（只覆盖 `packages/core`）+ CDP 截图脚本 + 可选 CI 配置 |
 | 部署 | 本地 Docker Compose；自托管 systemd + Docker nginx（见 [DEPLOY.md](DEPLOY.md)） |
 | 版本控制 | ✅ Git 仓库（`.github/workflows/ci.yml` 可选启用） |
 
@@ -41,7 +41,8 @@
 | 日视图列宽 | ✅ | 1× / 2× / 3×（30 / 60 / 90px 每天）；仅日视图显示控件，刷新恢复 1× |
 | 晨会聚焦 | ✅ | 当前项目 + 最近 3 个工作日；前天/昨天完成、今天计划、今天到期、逾期、未分配；非焦点任务淡化 |
 | 加班占用节假日 | ✅ | 人员级 + 任务级，插入黄色加班列 |
-| 撤销 / 重做 | ✅ | `⌘Z` / `⌘⇧Z`，只覆盖单任务改期 |
+| 撤销 / 重做 | ✅ | `⌘Z` / `⌘⇧Z`，覆盖拖拽、日期输入、工时修改与整批联动 |
+| 改期联动 | ✅ | 同负责人 / 同父级分支、开始日更晚的未完成任务按工作日 delta 平移；默认开启，可关；拖拽有 ghost 预览 |
 | 筛选 / 搜索 | ✅ | 名称、负责人、状态；人员筛选只列当前项目有任务的负责人；保留祖先上下文 |
 | CSV 模板导入 / 导出 | ✅ | WBS 编号制，往返闭环 |
 | 里程碑 | ✅ | 零工期菱形节点 |
@@ -239,12 +240,18 @@ mplan/
 | PUT | `/api/persons/:id/days` | 整表替换某人的加班/请假 |
 | PUT | `/api/calendar` | 整表替换周末 + 例外 |
 | POST | `/api/projects/:id/tasks` | 建任务（自动算 depth/sort/结束日） |
-| PATCH | `/api/tasks/:id` | 改任意字段，按 `recalc` 决定怎么重算 |
+| PATCH | `/api/tasks/:id` | 改任意字段，按 `recalc` 决定怎么重算；`shiftFollowing` 打开时联动后续任务 |
+| PUT | `/api/projects/:id/task-dates` | 批量恢复日期（撤销 / 重做用），只写日期与工时，不触发联动 |
 | DELETE | `/api/tasks/:id` | 级联删子树 |
 | PUT | `/api/tasks/:id/days` | 任务级加班日 |
 | POST | `/api/tasks/:id/postpone` | 该任务及其后未完成任务整体顺延 |
 | POST | `/api/import` | CSV 导入（按编号建树，可顺手新建项目） |
+| POST | `/api/projects/:id/reinitialize` | 重新初始化项目（项目管理员）：删旧任务/旧日志，按 CSV 重建，可更新项目完成日 |
 | GET | `/api/projects/:id/changes` | 变更日志，默认 120 条（前端请求 200） |
+
+**重新初始化**（`POST /api/projects/:id/reinitialize`）用于排计划初期整版覆盖：保留项目信息、成员、权限和人员库；删除当前项目全部任务、任务级加班/请假和旧变更日志；按 CSV 重建任务树，任务 ID 全部重新生成。服务端先完整校验并在一个事务里删旧 + 插新，失败不会破坏旧计划；`updateProjectDue: true` 时把项目计划完成日更新为新任务的最晚结束日，否则保留原值。前端只对项目管理员显示该模式，并要求勾选删除确认。
+
+**导入工时优先级**：CSV「工时」单元格非空（请求里的 `hoursProvided`）时按工时排期，`1h` 保持 `1h`；结束日只做一致性校验，不一致时返回 `warnings`，不会静默反算成 `8h`。只有工时留空时才用结束日反算工时。追加导入和重新初始化共用这套规则。
 
 ### 三个必须遵守的约定
 
@@ -258,11 +265,13 @@ recalc: 'hours'  // 按工时重排结束日（默认）
 
 不传时：带 `dueDate` 走 `due`，否则走 `hours`。父任务（有子节点）的日期不参与重算。
 
+`shiftFollowing: true` 时，日期 / 工时变化会触发改期联动：同负责人或同父级分支下、开始日严格晚于原结束日的未完成叶子任务，按公司日历 delta 平移；主任务和联动任务在同一个事务里更新，响应带 `autoShift` / `shiftedTaskIds`。撤销 / 重做走 `PUT /api/projects/:id/task-dates`，只写快照、不触发联动。
+
 **权限约定（两层）**：
 
 1. **登录**：`GET / HEAD` 全部公开；`POST / PUT / PATCH / DELETE` 除 `/api/auth/login`、`/api/auth/setup`、`/api/auth/logout` 外都要求登录。由 `attachAuth()` 统一做，新增写路由不需要单独写 401。
 2. **资源**：登录之后还要判断能不能改这个资源。
-   - 任务 / 任务加班日 / 顺延 / 导入到已有项目：`requireProjectAccess(req, projectId)` —— 全局管理员或 `projectIds` 包含该项目；
+   - 任务 / 任务加班日 / 顺延 / 批量日期恢复 / 导入到已有项目：`requireProjectAccess(req, projectId)` —— 全局管理员或 `projectIds` 包含该项目；
    - 项目信息修改、项目成员管理：`requireProjectAdmin(req, projectId)` —— 全局管理员或 `projectAdminIds` 包含该项目；
    - 项目增删、人员增删改、公司日历、导入时新建项目、账号管理：`requireAdmin(req)`。
 
@@ -276,7 +285,7 @@ recalc: 'hours'  // 按工时重排结束日（默认）
 
 ### 状态（Zustand，单 store）
 
-`boot`（全局）、`detail`（当前项目全量任务）、`user` / `canEdit`（当前项目）/ `canAdminCurrent`（当前项目管理员）/ `canEditGlobal`（全局管理员）/ `isAdmin` / `needsSetup`（登录与权限）、`collapsed`、`zoom`、`dayWidthScale`（日视图 1× / 2× / 3×）、`view`、`standupMode`（晨会聚焦）、`filter`、`selectedId`、`modal`（含 `login` / `users` / `projectSettings`）、`history/future`（撤销栈）、`toast`。
+`boot`（全局）、`detail`（当前项目全量任务）、`user` / `canEdit`（当前项目）/ `canAdminCurrent`（当前项目管理员）/ `canEditGlobal`（全局管理员）/ `isAdmin` / `needsSetup`（登录与权限）、`collapsed`、`zoom`、`dayWidthScale`（日视图 1× / 2× / 3×）、`view`、`standupMode`（晨会聚焦）、`filter`、`selectedId`、`modal`（含 `login` / `users` / `projectSettings`）、`autoShift`（联动开关，localStorage 持久化）、`history/future`（批量撤销栈）、`toast`。
 
 所有写操作统一走 store 的 action（`patchTask` / `addTask` / `commitDates` / `removeTask`…），内部都是「调接口 → `refreshProject()` 重拉」。**没有做乐观更新**，本地延迟极低，简单优先。
 
@@ -338,6 +347,19 @@ cols      = round((timelineX - startTimelineX) / colWidth)
 
 只用 `clientX - startX` 的话，边缘自动滚动时任务条会滞后于指针。
 
+### 大项目渲染（300 任务级）
+
+拖拽期间只允许被拖任务和 ghost 任务重渲染，别把整张表带进去：
+
+- `BoardTaskRow` / `Bar` / `TaskCell` 都用 `memo`；传给它们的选择、完成、拖拽回调必须是**稳定引用**（`useCallback` 或 ref 转发），否则 memo 会被内联函数打破；
+- `previewStart` / `previewDue` / `ghost` / `dragging` 都传原始值，不要传每次新建的 `{ start, due }` 对象；
+- 网格、月份分隔线、加班列只有一层覆盖层，不要每行重复画；
+- 拖拽更新用 `requestAnimationFrame` 合并，一帧最多一次 `setDrag`；
+- 自动滚动的视口 `rect` 在拖拽开始时缓存，不要在每帧 `getBoundingClientRect()`；
+- 拖拽期间给 Board 加 `is-dragging`，CSS 临时关掉非拖拽条的阴影和行过渡（Safari 对大量 `box-shadow` / `transition` 更敏感）。
+
+本地 300 任务项目实测：拖拽一个任务时只有 23/310 行产生 DOM 变更（主任务 + 22 个 ghost），而不是整表重渲染。
+
 ### 弹窗
 
 `ui.tsx` 的 `Modal` 用 `createPortal` 挂到 `body`。**必须这样**：任务抽屉有 `transform` 动画，会成为 `fixed` 的包含块，弹窗会被困在抽屉里。
@@ -389,7 +411,7 @@ cols      = round((timelineX - startTimelineX) / colWidth)
 ### 单测（只覆盖 core）
 
 ```bash
-pnpm test   # 31 个，覆盖 2026 节假日/调休、工期换算、进度封顶、加班、CSV 编号/日期/行号校验、最近工作日
+pnpm test   # 41 个，覆盖 2026 节假日/调休、工期换算、进度封顶、加班、改期联动、项目超期、CSV 编号/日期/行号校验、最近工作日
 ```
 
 日历和工期是最容易算错的地方，改 `calendar.ts` / `schedule.ts` / `csv.ts` 必须补用例。注意 2026-10-10 是周六但属于调休补班日——这类坑只能靠测试兜住。
@@ -454,14 +476,14 @@ return document.querySelector('aside')?.innerText.slice(0, 80);
 |---|---|---|---|
 | 1 | 读接口无鉴权 | 能访问到服务的人可以看全部项目数据；这是「匿名只读」的有意设计 | 自托管可接受；面向公网再加一层网关认证 |
 | 2 | 登录 / 失败 / 下线没有审计日志 | 只能看业务变更，查不到谁在什么时候登录过 | 需要时加 `auth_log` 表；actor 本身已来自会话 |
-| 3 | 顺延不进撤销栈 | 误点只能手动改回 | 把顺延记成多任务快照 |
+| 3 | 跨项目 / 跨模块依赖未建模 | 不同项目的关联任务不会自动联动，只能手工调整 | 需要时再加显式「关联任务」，不要靠时间顺序猜 |
 | 4 | 无 migration 文件，`db:push` 直连 | 改 schema 可能丢数据 | 上线前切到 `drizzle-kit generate` + migrate |
 | 5 | 2027 年节假日未内置 | 2027 年的任务会把节假日算成工作日 | 国务院发文后补 `holidays-cn.ts` |
 | 6 | 人员超载是近似估算 | 按「工时 ÷ 工期」均摊到每天，不考虑任务依赖和半天粒度 | 够用就别动 |
 | 7 | 导出不跟随筛选 | 想导出"只看某个人的任务"做不到 | 一行改动：用筛选后的 id 集合 |
 | 8 | 甘特无虚拟滚动 | 40 行流畅，几百行会卡 | 行数上千再优化 |
 | 9 | 无响应式，移动端不可用 | 手机上布局会挤 | 做只读视图即可 |
-| 10 | 拖拽不与其它任务联动 | 不会自动避让/吸附 | 属于「任务依赖」范畴，见 §10 |
+| 10 | 改期联动是启发式规则 | 同负责人 / 同父级分支之外的依赖不会自动推；开始日不晚于原结束日的任务按并行处理 | 需要精确关系时加显式关联，见 §10 |
 | 11 | `done_at` 存的是 UTC 时间但只当布尔用 | 现在没影响，展示完成时间时会差 8 小时 | 要展示时统一转 +08:00 |
 | 12 | 登录失败计数在内存里 | 重启 API 会清零；多实例不共享 | 单机部署无所谓；多实例换 Redis |
 | 13 | 只读模式仍会拉全量数据 | 大项目匿名访问有一定流量 | 10 人规模无感 |
@@ -525,12 +547,15 @@ return document.querySelector('aside')?.innerText.slice(0, 80);
 | 甘特时间轴 / 列宽 | `packages/core/src/axis.ts`、`apps/web/src/lib/gantt.ts` |
 | 甘特渲染 / 拖拽 / 里程碑 | `apps/web/src/components/Board.tsx` |
 | 任务详情 / 顺延 | `apps/web/src/components/TaskDrawer.tsx` |
+| 改期联动规则 / 项目超期 | `packages/core/src/shift.ts` |
+| 改期联动接口 / 批量日期恢复 | `apps/api/src/routes.ts` |
+| 联动开关 / ghost 预览 / 批量撤销 | `apps/web/src/components/TopBar.tsx`、`Board.tsx`、`store.ts` |
 | 筛选逻辑 | `apps/web/src/lib/gantt.ts` 的 `buildBoard`、`FilterBar.tsx` |
 | CSV 格式 | `packages/core/src/csv.ts` |
 | 变更日志 | `apps/api/src/lib/log.ts`、`ChangesModal.tsx` |
 | 登录 / 会话 / 登录拦截 / 项目权限判断 | `apps/api/src/lib/auth.ts` |
 | 登录 / 账号管理 / 项目分配接口 | `apps/api/src/routes.auth.ts` |
-| 项目信息 / 项目成员 / 归档接口 | `apps/api/src/routes.ts` |
+| 项目信息 / 项目成员 / 归档 / 批量日期接口 | `apps/api/src/routes.ts` |
 | 登录弹窗 / 用户管理与项目角色 | `apps/web/src/components/LoginModal.tsx`、`UsersModal.tsx` |
 | 项目设置 / 成员 / 归档弹窗 | `apps/web/src/components/ProjectSettingsModal.tsx` |
 | 只读态 UI | `apps/web/src/components/TopBar.tsx`、`Board.tsx`、`TaskDrawer.tsx`、`PeopleModal.tsx`、`CalendarModal.tsx` |
